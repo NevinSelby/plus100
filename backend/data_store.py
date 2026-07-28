@@ -541,6 +541,21 @@ class Store:
           player_rates            — per team: recent players with their share of team xG
           xg_data_to              — freshness stamp shown in the UI
         """
+        # Small hosts load a precomputed artifact instead of parsing 570k shots:
+        # the inputs are static (the xG source updates a few times a year), so
+        # this is the same numbers without the memory spike.
+        pre = DATA / "xg_precomputed.json.gz"
+        if LOW_MEM and pre.exists():
+            import gzip, json as _json
+            with gzip.open(pre, "rt") as fh:
+                blob = _json.load(fh)
+            self.xg_attack = blob["xg_attack"]
+            self.xg_defence = blob["xg_defence"]
+            self.player_rates = blob["player_rates"]
+            self.xg_data_to = blob["xg_data_to"]
+            print(f"[xg] loaded precomputed strengths ({len(self.player_rates)} squads)")
+            return
+
         frames = []
         for us_lg, code in UNDERSTAT_LEAGUES.items():
             f = DATA / "understat" / f"{us_lg}_shots.csv"
