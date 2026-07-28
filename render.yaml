@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: plus100
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn backend.app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/meta
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.7"
+      - key: ODDS_API_KEY
+        sync: false

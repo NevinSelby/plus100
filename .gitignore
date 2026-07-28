@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+data/store_cache.pkl
+data/oddsapi_key.txt
+data/logo_cache.json
+data/player_team_cache.json
