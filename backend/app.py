@@ -279,10 +279,12 @@ def _tsdb_team(team_id: str) -> dict:
     t = _team_or_404(team_id)
     with _logo_lock:
         cached = _logo_cache.get(team_id)
-    if isinstance(cached, dict):
+    if isinstance(cached, dict) and "fanart" in cached:   # old entries lack imagery: refetch
         return cached
     name = t["name"]
-    entry = {"badge": cached if isinstance(cached, str) else None, "tsdb_name": None}
+    entry = {"badge": cached.get("badge") if isinstance(cached, dict) else
+             cached if isinstance(cached, str) else None,
+             "tsdb_name": None, "fanart": None, "stadium": None, "capacity": None}
     try:
         r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
                          params={"t": name}, headers=UA, timeout=8)
@@ -291,7 +293,10 @@ def _tsdb_team(team_id: str) -> dict:
         if soccer:
             exact = [x for x in soccer if norm_key(x.get("strTeam", "")) == norm_key(name)]
             best = (exact or soccer)[0]
-            entry = {"badge": best.get("strBadge"), "tsdb_name": best.get("strTeam")}
+            entry = {"badge": best.get("strBadge"), "tsdb_name": best.get("strTeam"),
+                     "fanart": best.get("strFanart1") or best.get("strBanner"),
+                     "stadium": best.get("strStadium"),
+                     "capacity": best.get("intStadiumCapacity")}
     except Exception:  # noqa: BLE001
         pass
     with _logo_lock:
@@ -302,7 +307,9 @@ def _tsdb_team(team_id: str) -> dict:
 
 @app.get("/api/logo")
 def logo(team_id: str):
-    return {"badge": _tsdb_team(team_id)["badge"]}
+    e = _tsdb_team(team_id)
+    return {"badge": e["badge"], "fanart": e.get("fanart"),
+            "stadium": e.get("stadium"), "capacity": e.get("capacity")}
 
 
 # ---------- probable lineups (squad data from TheSportsDB + our scorer model) ----------
