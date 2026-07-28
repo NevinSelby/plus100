@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -23,6 +24,10 @@ PLAYER_TEAM_CACHE_FILE = ROOT / "data" / "player_team_cache.json"
 UA = {"User-Agent": "Mozilla/5.0 (FootballAnalytics; personal research tool)"}
 
 app = FastAPI(title="Plus100 Football Predictor")
+
+# Read-only public API: allow browser clients (Expo web debugging, the PWA on
+# another origin) to call it. The native app is unaffected by CORS.
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
 # The model store takes a couple of minutes to build on a cold machine (it
 # downloads the full match history first). Build it in the background so the
