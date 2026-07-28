@@ -177,6 +177,43 @@ def h2h(home: str, away: str):
     }
 
 
+_ABSENCE_WORDS = ("injur", "ruled out", "out for", "sidelined", "doubt", "suspended",
+                  "banned", "surgery", "hamstring", "acl", "fracture", "misses", "miss ")
+
+
+def _news_absences(tid: str, names: list[str]) -> list[str]:
+    """Players from `names` who appear in recent team-news headlines next to an
+    absence word (injury, suspension, ruled out …). Best-effort, cached with news."""
+    try:
+        items = news(tid)["items"]
+    except Exception:  # noqa: BLE001
+        return []
+    outs = []
+    for n in names:
+        parts = [w for w in str(n).split() if len(w) > 3]
+        if not parts:
+            continue
+        last = norm_key(parts[-1])
+        for it in items:
+            title = (it.get("title") or "").lower()
+            if last in norm_key(title) and any(w in title for w in _ABSENCE_WORDS):
+                outs.append(n)
+                break
+    return outs
+
+
+def _auto_absences(tid: str) -> list[str]:
+    """News-detected likely absentees among the players our model tracks."""
+    reg = store.registry.get(tid, {})
+    if reg.get("scope") == "club":
+        names = [r["player"] for r in store.player_rates.get(tid, [])[:12]]
+    else:
+        sg = store.scorer_goals
+        names = list(sg[sg.team == reg.get("name", "")].sort_values(
+            "wgoals", ascending=False).scorer.head(10))
+    return _news_absences(tid, names)
+
+
 @app.get("/api/predict")
 def predict_endpoint(home: str, away: str, neutral: bool = False,
                      out_home: str = "", out_away: str = "", context: str = "none"):
@@ -186,8 +223,18 @@ def predict_endpoint(home: str, away: str, neutral: bool = False,
         raise HTTPException(400, "pick two different teams")
     oh = [p.strip() for p in out_home.split("|") if p.strip()]
     oa = [p.strip() for p in out_away.split("|") if p.strip()]
-    p = predict(store, home, away, neutral, out_home=oh, out_away=oa, context=context)
+    # No manual list given: scan team news for likely absentees so the numbers
+    # reflect who can actually play, not just the two crests.
+    auto_oh = [] if oh else _auto_absences(home)
+    auto_oa = [] if oa else _auto_absences(away)
+    p = predict(store, home, away, neutral, out_home=oh or auto_oh,
+                out_away=oa or auto_oa, context=context)
     _verify_squads(p)
+    for team_name, outs in ((p["home"]["name"], auto_oh), (p["away"]["name"], auto_oa)):
+        if outs:
+            p.setdefault("caveats", []).append(
+                f"Team news suggests {', '.join(outs)} may be unavailable for {team_name}; "
+                "the goal expectation was reduced for the minutes they usually provide.")
     return p
 
 
@@ -490,6 +537,10 @@ def _team_lineup(tid: str, lam: float) -> dict:
             squad.append(info)
             have.add(norm_key(info["name"]))
 
+    # drop players the news says are out (injury, suspension, transfer talk aside)
+    outs = _news_absences(tid, [p["name"] for p in squad])
+    squad = [p for p in squad if p["name"] not in outs]
+
     rows: dict[str, list] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for p in squad:
         rows[p["bucket"]].append(p)
@@ -513,6 +564,8 @@ def _team_lineup(tid: str, lam: float) -> dict:
         "formation": "-".join(str(len(rows[b])) for b in ("DEF", "MID", "FWD")),
         "players": players,
         "known": sum(len(v) for v in rows.values()),
+        "gk_missing": len(rows["GK"]) == 0,
+        "outs": outs,
     }
 
 
