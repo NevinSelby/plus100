@@ -126,7 +126,7 @@ def next_gameweek(store: Store) -> dict:
             continue
         players.append({
             "id": e["id"], "name": e["web_name"],
-            "photo": f"https://resources.premierleague.com/premierleague/photos/players/110x110/p{e['code']}.png",
+            "photo": f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{e['code']}.png",
             "team": tmap[e["team"]]["fpl"]["short_name"], "opp": ctx["opp"],
             "home": ctx["home"], "pos": POS[e["element_type"]],
             "price": e["now_cost"] / 10, "owned_pct": float(e["selected_by_percent"] or 0),
