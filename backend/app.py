@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
+import unicodedata
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -16,7 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .data_store import get_store, norm_key
-from .model import predict
+from .model import expected_goals, likely_scorers, likely_scorers_club, predict
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGO_CACHE_FILE = ROOT / "data" / "logo_cache.json"
@@ -301,6 +303,221 @@ def _tsdb_team(team_id: str) -> dict:
 @app.get("/api/logo")
 def logo(team_id: str):
     return {"badge": _tsdb_team(team_id)["badge"]}
+
+
+# ---------- probable lineups (squad data from TheSportsDB + our scorer model) ----------
+
+LINEUP_CACHE_FILE = ROOT / "data" / "lineup_cache.json"
+_lineup_lock = threading.Lock()
+_lineup_cache: dict = (
+    json.loads(LINEUP_CACHE_FILE.read_text()) if LINEUP_CACHE_FILE.exists() else {}
+)
+_SQUAD_TTL = 3 * 86400
+_STAFF_WORDS = ("manager", "coach", "assistant", "director", "physio", "analyst", "scout")
+
+
+def _pos_bucket(pos: str) -> str | None:
+    p = (pos or "").lower()
+    if any(w in p for w in _STAFF_WORDS):
+        return None
+    if "goalkeeper" in p or p == "gk":
+        return "GK"
+    if "midfield" in p:
+        return "MID"
+    if "back" in p or "defen" in p or "sweeper" in p:
+        return "DEF"
+    if any(w in p for w in ("winger", "forward", "striker", "attack", "wing")):
+        return "FWD"
+    return None
+
+
+def _pos_x_order(pos: str) -> int:
+    p = (pos or "").lower()
+    if "left" in p:
+        return 0
+    if "right" in p:
+        return 2
+    return 1
+
+
+def _tsdb_squad(team_id: str) -> list[dict]:
+    """Squad players with position + cutout photo, cached a few days on disk."""
+    with _lineup_lock:
+        hit = _lineup_cache.get(team_id)
+    if hit and time.time() - hit["at"] < _SQUAD_TTL:
+        return hit["players"]
+    t = _team_or_404(team_id)
+    players = []
+    try:
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
+                         params={"t": t["name"]}, headers=UA, timeout=8)
+        teams = [x for x in (r.json() or {}).get("teams") or [] if x.get("strSport") == "Soccer"]
+        exact = [x for x in teams if norm_key(x.get("strTeam", "")) == norm_key(t["name"])]
+        best = (exact or teams)[0] if teams else None
+        if best:
+            r2 = requests.get("https://www.thesportsdb.com/api/v1/json/3/lookup_all_players.php",
+                              params={"id": best["idTeam"]}, headers=UA, timeout=8)
+            for p in (r2.json() or {}).get("player") or []:
+                if (p.get("strStatus") or "").lower() in ("deceased", "retired"):
+                    continue
+                bucket = _pos_bucket(p.get("strPosition"))
+                if bucket:
+                    players.append({
+                        "name": p.get("strPlayer"), "pos": p.get("strPosition"),
+                        "bucket": bucket,
+                        "img": p.get("strCutout") or p.get("strThumb") or None,
+                    })
+    except Exception:  # noqa: BLE001
+        return players
+    with _lineup_lock:
+        _lineup_cache[team_id] = {"at": time.time(), "players": players}
+        try:
+            LINEUP_CACHE_FILE.write_text(json.dumps(_lineup_cache))
+        except OSError:
+            pass
+    return players
+
+
+def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
+    """Position + photo for one player by name, verified against the team.
+
+    Guards against namesakes: a non-exact match must also belong to the team
+    (club: current club matches; international: nationality matches). An exact
+    normalized name match is accepted as a last resort so short forms like
+    "Messi" still resolve even though his club is not "Argentina"."""
+    key = f"p2:{norm_key(team_name)}:{norm_key(name)}"
+    with _lineup_lock:
+        hit = _lineup_cache.get(key)
+    if hit is not None:
+        return hit or None
+    qk = norm_key(name)
+    tk = norm_key(team_name)
+    gated, exact_only = None, None
+    try:
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchplayers.php",
+                         params={"p": name}, headers=UA, timeout=6)
+        if r.status_code != 200:
+            return None                       # rate limited: don't cache the miss
+        for p in (r.json() or {}).get("player") or []:
+            if p.get("strSport") != "Soccer":
+                continue
+            if (p.get("strStatus") or "").lower() in ("deceased", "retired"):
+                continue
+            bucket = _pos_bucket(p.get("strPosition"))
+            if not bucket:
+                continue
+            pk = norm_key(p.get("strPlayer", ""))
+            exact = pk == qk
+            words = set(re.sub(r"[^a-z0-9 ]", "",
+                               unicodedata.normalize("NFKD", p.get("strPlayer", ""))
+                               .encode("ascii", "ignore").decode().lower()).split())
+            word_hit = qk in words
+            if not exact and not word_hit:
+                continue
+            team_ok = (norm_key(p.get("strNationality") or "") == tk) if intl \
+                else (tk in norm_key(p.get("strTeam") or "") or
+                      norm_key(p.get("strTeam") or "") in tk if p.get("strTeam") else False)
+            info = {"name": p.get("strPlayer"), "pos": p.get("strPosition"),
+                    "bucket": bucket,
+                    "img": p.get("strCutout") or p.get("strThumb") or None}
+            if team_ok and gated is None:
+                gated = info
+            if exact and exact_only is None:
+                exact_only = info
+    except Exception:  # noqa: BLE001
+        return None
+    best = gated or exact_only
+    with _lineup_lock:
+        _lineup_cache[key] = best or False
+        try:
+            LINEUP_CACHE_FILE.write_text(json.dumps(_lineup_cache))
+        except OSError:
+            pass
+    return best
+
+
+_ROW_CAPS = {"GK": 1, "DEF": 5, "MID": 5, "FWD": 3}
+
+
+def _team_lineup(tid: str, lam: float) -> dict:
+    t = _team_or_404(tid)
+    reg = store.registry[tid]
+    if reg.get("scope") == "club":
+        scorers = likely_scorers_club(store, tid, lam)
+    else:
+        scorers = likely_scorers(store, t["name"], lam)
+    p_by_key = {norm_key(s["player"]): s["prob_to_score"] for s in scorers}
+
+    squad = [dict(p) for p in _tsdb_squad(tid)]
+    have = {norm_key(p["name"]) for p in squad}
+
+    def match_prob(name: str) -> float | None:
+        k = norm_key(name)
+        if k in p_by_key:
+            return p_by_key[k]
+        for sk, v in p_by_key.items():   # "Mac Allister" vs "Alexis Mac Allister"
+            if len(sk) > 5 and (sk in k or k in sk):
+                return v
+        return None
+
+    for p in squad:
+        p["p_score"] = match_prob(p["name"])
+
+    # top scorers missing from the squad list get looked up individually
+    intl = reg.get("scope") != "club"
+    extra_budget = 5
+    for s in scorers:
+        if extra_budget == 0:
+            break
+        k = norm_key(s["player"])
+        if any(len(k) > 5 and (k in h or h in k) for h in have):
+            continue
+        info = _player_lookup(s["player"], t["name"], intl)
+        extra_budget -= 1
+        if info and norm_key(info["name"]) not in have:
+            info["p_score"] = s["prob_to_score"]
+            squad.append(info)
+            have.add(norm_key(info["name"]))
+
+    rows: dict[str, list] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    for p in squad:
+        rows[p["bucket"]].append(p)
+    for b, cap in _ROW_CAPS.items():
+        rows[b].sort(key=lambda p: (-(p.get("p_score") or 0), p.get("img") is None,
+                                    _pos_x_order(p["pos"]), p["name"]))
+        rows[b] = rows[b][:cap]
+        rows[b].sort(key=lambda p: (_pos_x_order(p["pos"]), p["name"]))
+    # trim to 11 by dropping from the largest outfield rows first
+    while sum(len(v) for v in rows.values()) > 11:
+        biggest = max(("DEF", "MID", "FWD"), key=lambda b: len(rows[b]))
+        rows[biggest].pop()
+
+    players = []
+    for ri, b in enumerate(("GK", "DEF", "MID", "FWD")):
+        n = len(rows[b])
+        for si, p in enumerate(rows[b]):
+            players.append({**p, "row": ri, "slot": si, "n": n})
+    return {
+        "id": tid, "name": t["name"], "badge": _tsdb_team(tid)["badge"],
+        "formation": "-".join(str(len(rows[b])) for b in ("DEF", "MID", "FWD")),
+        "players": players,
+        "known": sum(len(v) for v in rows.values()),
+    }
+
+
+@app.get("/api/lineup")
+def lineup(home: str, away: str, neutral: bool = False):
+    """Probable line-ups for a matchup: public squad data (TheSportsDB) ranked by
+    our model's scoring shares. These are LIKELY players, not confirmed team sheets."""
+    _require_store()
+    eg = expected_goals(store, home, away, neutral=neutral)
+    return {
+        "home": _team_lineup(home, eg["lambda_home"]),
+        "away": _team_lineup(away, eg["lambda_away"]),
+        "note": ("Built from public squad data ranked by each player's share of his "
+                 "team's expected goals. Real team sheets drop about an hour before "
+                 "kickoff and can differ."),
+    }
 
 
 def _player_current_team(player: str) -> str | None:
