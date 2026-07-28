@@ -23,7 +23,24 @@ PLAYER_TEAM_CACHE_FILE = ROOT / "data" / "player_team_cache.json"
 UA = {"User-Agent": "Mozilla/5.0 (FootballAnalytics; personal research tool)"}
 
 app = FastAPI(title="Plus100 Football Predictor")
-store = get_store()
+
+# The model store takes a couple of minutes to build on a cold machine (it
+# downloads the full match history first). Build it in the background so the
+# web server binds its port immediately — cloud hosts kill services that do
+# not answer within a few minutes of starting.
+store = None
+warmup = {"ready": False, "error": None, "since": time.time()}
+
+
+def _warm_up() -> None:
+    global store
+    try:
+        store = get_store()
+        warmup["ready"] = True
+        from .refresher import start_background
+        start_background()
+    except Exception as e:  # noqa: BLE001
+        warmup["error"] = str(e)[:300]
 
 
 from .refresher import REFRESH_HOURS  # noqa: E402
@@ -31,9 +48,22 @@ from .refresher import state as refresher_state  # noqa: E402
 
 
 @app.on_event("startup")
-def _start_refresher():
-    from .refresher import start_background
-    start_background()
+def _start_warmup():
+    threading.Thread(target=_warm_up, daemon=True, name="plus100-warmup").start()
+
+
+@app.get("/healthz")
+def healthz():
+    """Liveness probe: answers immediately, even while the model is building."""
+    return {"ok": True, "model_ready": warmup["ready"],
+            "warming_for_s": round(time.time() - warmup["since"]),
+            "error": warmup["error"]}
+
+
+def _require_store():
+    if store is None:
+        raise HTTPException(503, "Model is still starting up. First boot downloads the "
+                                 "match history and takes a couple of minutes — try again shortly.")
 
 _logo_lock = threading.Lock()
 _logo_cache: dict[str, dict | str | None] = (
@@ -46,6 +76,7 @@ _news_cache: dict[str, tuple[float, list]] = {}
 
 
 def _team_or_404(tid: str) -> dict:
+    _require_store()
     t = store.registry.get(tid)
     if not t:
         raise HTTPException(404, f"unknown team id: {tid}")
@@ -54,6 +85,7 @@ def _team_or_404(tid: str) -> dict:
 
 @app.get("/api/teams")
 def team_search(q: str = Query("", max_length=60), limit: int = 12):
+    _require_store()
     key = norm_key(q)
     if len(key) < 2:
         return []
@@ -166,6 +198,7 @@ class ParlayReq(BaseModel):
 
 @app.get("/api/parlay/suggest")
 def parlay_suggest(home: str, away: str, neutral: bool = False, context: str = "none"):
+    _require_store()
     from .model import suggest_parlays
     _team_or_404(home)
     _team_or_404(away)
@@ -174,6 +207,7 @@ def parlay_suggest(home: str, away: str, neutral: bool = False, context: str = "
 
 @app.post("/api/parlay")
 def parlay_endpoint(req: ParlayReq):
+    _require_store()
     from .model import simulate_sgp
     _team_or_404(req.home)
     _team_or_404(req.away)
@@ -195,6 +229,7 @@ def parlay_endpoint(req: ParlayReq):
 
 @app.get("/api/bestbets")
 def bestbets_endpoint(key: str = "", home: str = "", away: str = ""):
+    _require_store()
     from .bestbets import best_bets
     k = _resolve_key(key)
     if not k:
@@ -377,6 +412,7 @@ def scan_sports(key: str = ""):
 
 @app.get("/api/fpl/gw")
 def fpl_gameweek():
+    _require_store()
     from .fpl import next_gameweek
     try:
         return next_gameweek(store)
@@ -386,6 +422,7 @@ def fpl_gameweek():
 
 @app.get("/api/fpl/entry/{entry_id}")
 def fpl_entry(entry_id: int):
+    _require_store()
     from .fpl import entry_analysis
     try:
         return entry_analysis(store, entry_id)
@@ -395,6 +432,7 @@ def fpl_entry(entry_id: int):
 
 @app.get("/api/meta")
 def meta():
+    _require_store()
     m = store.matches
     return {
         "matches": int(len(m)),
