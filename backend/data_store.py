@@ -5,15 +5,24 @@ All heavy computation happens once at startup and is cached to a pickle.
 """
 from __future__ import annotations
 
+import gc
 import math
 import pickle
 import re
 import unicodedata
-from collections import defaultdict
+from collections import defaultdict, deque
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+import os
+
+# Small cloud instances (512 MB) cannot hold the full history while building.
+# LOW_MEM trims to recent seasons and skips the on-disk cache, which is useless
+# there anyway because the filesystem is wiped on every restart.
+LOW_MEM = os.environ.get("PLUS100_LOW_MEM") == "1"
+MIN_YEAR = int(os.environ.get("PLUS100_MIN_YEAR", "0") or 0)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
@@ -128,11 +137,32 @@ def _read_csv(path: Path, **kw) -> pd.DataFrame:
     raise RuntimeError(f"cannot read {path}")
 
 
+
+# The raw match files carry a column per bookmaker (about 100 in recent seasons).
+# Reading only what the model uses keeps peak memory small enough for modest hosts.
+_CLUB_COLS = {
+    "div", "date", "time", "hometeam", "awayteam", "fthg", "ftag",
+    "psh", "psd", "psa", "b365h", "b365d", "b365a", "whh", "whd", "wha",
+    "avgh", "avgd", "avga", "hc", "ac", "hy", "ay", "hr", "ar",
+}
+_EXTRA_COLS = {
+    "country", "league", "season", "date", "time", "home", "away", "hg", "ag",
+    "psch", "pscd", "psca", "avgch", "avgcd", "avgca",
+}
+
+
+def _wanted(cols: set):
+    return lambda c: str(c).strip().lower() in cols
+
 def load_club_matches() -> pd.DataFrame:
     frames = []
     for f in sorted((DATA / "club").glob("*.csv")):
         lg, season = f.stem.split("_")
-        df = _read_csv(f)
+        if MIN_YEAR and len(season) == 4 and season.isdigit():
+            start = 2000 + int(season[:2])          # "1011" -> 2010/11 season
+            if start < MIN_YEAR:
+                continue                            # never read it at all
+        df = _read_csv(f, usecols=_wanted(_CLUB_COLS))
         df.columns = [c.strip() for c in df.columns]
         need = {"Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"}
         if not need.issubset(df.columns):
@@ -156,10 +186,16 @@ def load_club_matches() -> pd.DataFrame:
             sub[col] = pd.to_numeric(df.get(src), errors="coerce")
         sub["league"] = lg
         sub["season"] = season
+        for c in ("home", "away"):
+            sub[c] = sub[c].astype("category")
+        for c in ("oddsH", "oddsD", "oddsA"):
+            if c in sub.columns:
+                sub[c] = sub[c].astype("float32")
         frames.append(sub)
+        del df
     for f in sorted((DATA / "extra").glob("*.csv")):
         lg = f.stem
-        df = _read_csv(f)
+        df = _read_csv(f, usecols=_wanted(_EXTRA_COLS))
         df.columns = [c.strip() for c in df.columns]
         if not {"Date", "Home", "Away", "HG", "AG"}.issubset(df.columns):
             continue
@@ -227,7 +263,9 @@ def compute_elo(matches: pd.DataFrame):
     (used to fit the elo -> expected-goals mapping).
     """
     ratings: dict[str, float] = {}
-    hist: dict[str, list] = defaultdict(list)
+    # only the recent tail is ever displayed; a bounded deque keeps this from
+    # growing to millions of points on a full history rebuild
+    hist: dict[str, deque] = defaultdict(lambda: deque(maxlen=90))
     n = len(matches)
     pre_diff = np.zeros(n)
     dates = matches.date.to_numpy()
@@ -257,7 +295,7 @@ def compute_elo(matches: pd.DataFrame):
         ratings[a] = ra - delta
         hist[h].append((dates[i], ratings[h]))
         hist[a].append((dates[i], ratings[a]))
-    return ratings, pre_diff, hist
+    return ratings, pre_diff, {k: list(v) for k, v in hist.items()}
 
 
 def fit_elo_goals(diff: np.ndarray, hg: np.ndarray, ag: np.ndarray):
@@ -300,7 +338,7 @@ def compute_strengths(m: pd.DataFrame, half_life_days: float = 420.0,
 
     # league weighted average goals (home & away)
     lg_stats = {}
-    for lg, g in mm.groupby("league"):
+    for lg, g in mm.groupby("league", observed=True):
         sw = g.w.sum()
         lg_stats[lg] = {"avg_hg": float((g.hg * g.w).sum() / sw),
                         "avg_ag": float((g.ag * g.w).sum() / sw)}
@@ -309,7 +347,7 @@ def compute_strengths(m: pd.DataFrame, half_life_days: float = 420.0,
     deff: dict[str, float] = {}
     rows = []
     for side, gcol, ccol in (("home_id", "hg", "ag"), ("away_id", "ag", "hg")):
-        g = mm.groupby(side).apply(
+        g = mm.groupby(side, observed=True).apply(
             lambda x: pd.Series({
                 "gs": (x[gcol] * x.w).sum(), "gc": (x[ccol] * x.w).sum(),
                 "sw": x.w.sum(), "league": x.league.iloc[-1]}),
@@ -338,6 +376,18 @@ class Store:
         # team ids: clubs may share names across countries rarely; key by name+scope
         m["home_id"] = m.home.map(slug) + np.where(m.scope == "intl", "@intl", "")
         m["away_id"] = m.away.map(slug) + np.where(m.scope == "intl", "@intl", "")
+        if MIN_YEAR:
+            m = m[m.date.dt.year >= MIN_YEAR].reset_index(drop=True)
+        for col in ("home", "away", "league", "season", "tournament",
+                    "home_id", "away_id", "scope"):
+            if col in m.columns:
+                m[col] = m[col].astype("category")
+        for col in ("hg", "ag", "hc", "ac", "hy", "ay", "hred", "ared"):
+            if col in m.columns:
+                m[col] = pd.to_numeric(m[col], errors="coerce").fillna(-1).astype("int16")
+        for col in ("oddsH", "oddsD", "oddsA"):
+            if col in m.columns:
+                m[col] = m[col].astype("float32")
         self.matches = m
 
         self.ratings, pre_diff, self.elo_hist = compute_elo(m)
@@ -365,7 +415,7 @@ class Store:
         last_date = m.date.max()
         reg: dict[str, dict] = {}
         for side in ("home", "away"):
-            grp = m.groupby(f"{side}_id").agg(
+            grp = m.groupby(f"{side}_id", observed=True).agg(
                 name=(side, "last"), league=("league", "last"),
                 scope=("scope", "last"), last=("date", "max"), n=("hg", "size"))
             for tid, row in grp.iterrows():
@@ -444,7 +494,7 @@ class Store:
         ex: dict[str, dict] = {}
         for side, cf, ca, cards in (("home_id", "hc", "ac", "h_cards"),
                                     ("away_id", "ac", "hc", "a_cards")):
-            for tid, g in mm.groupby(side):
+            for tid, g in mm.groupby(side, observed=True):
                 sw = g.w.sum()
                 if sw < 3:
                     continue
@@ -470,7 +520,7 @@ class Store:
         df = df[df.date >= (now - pd.Timedelta(days=365 * 6))]
         df = df[(df.own_goal.astype(str).str.upper() != "TRUE")]
         df["w"] = 0.5 ** ((now - df.date).dt.days / 540.0)
-        g = df.groupby(["team", "scorer"]).agg(
+        g = df.groupby(["team", "scorer"], observed=True).agg(
             goals=("w", "size"), wgoals=("w", "sum"), last=("date", "max"),
             goals_2y=("date", lambda d: int((d >= now - pd.Timedelta(days=730)).sum())),
         ).reset_index()
@@ -498,7 +548,14 @@ class Store:
                 f = f.with_suffix(".csv.gz")
                 if not f.exists():
                     continue
-            df = _read_csv(f)
+            # only the columns the strengths and player rates actually need:
+            # the full shot files carry coordinates and metadata we never read,
+            # and loading them all is what pushes peak memory over small hosts
+            df = _read_csv(f, usecols=["date", "xG", "player", "h_a", "result",
+                                       "match_id", "home_team", "away_team"],
+                           dtype={"player": "category", "home_team": "category",
+                                  "away_team": "category", "result": "category",
+                                  "h_a": "category"})
             df["league"] = code
             frames.append(df)
         if not frames:
@@ -506,6 +563,7 @@ class Store:
             self.xg_data_to = None
             return
         shots = pd.concat(frames, ignore_index=True)
+        del frames
         shots["date"] = pd.to_datetime(shots.date, errors="coerce")
         shots = shots.dropna(subset=["date", "xG"])
         self.xg_data_to = str(shots.date.max().date())
@@ -529,7 +587,7 @@ class Store:
         shots["team_id"] = np.where(shots.h_a == "h", shots.home_id, shots.away_id)
 
         # per-match team xG totals
-        agg = shots.groupby(["match_id", "league", "home_id", "away_id"], dropna=True).apply(
+        agg = shots.groupby(["match_id", "league", "home_id", "away_id"], dropna=True, observed=True).apply(
             lambda g: pd.Series({
                 "date": g.date.iloc[0],
                 "home_xg": g.xG[g.h_a == "h"].sum(),
@@ -541,13 +599,13 @@ class Store:
         agg = agg[agg.w > 0.01]
 
         xga, xgd = {}, {}
-        for lg, g in agg.groupby("league"):
+        for lg, g in agg.groupby("league", observed=True):
             sw = g.w.sum()
             avg_h, avg_a = (g.home_xg * g.w).sum() / sw, (g.away_xg * g.w).sum() / sw
             lam = (avg_h + avg_a) / 2
             for side, xg_for, xg_ag in (("home_id", "home_xg", "away_xg"),
                                         ("away_id", "away_xg", "home_xg")):
-                for tid, tg in g.groupby(side):
+                for tid, tg in g.groupby(side, observed=True):
                     tw = tg.w.sum()
                     for_r = (tg[xg_for] * tg.w).sum()
                     ag_r = (tg[xg_ag] * tg.w).sum()
@@ -568,18 +626,18 @@ class Store:
         recent = recent.dropna(subset=["team_id"])
         PRIOR_RATE, PRIOR_APPS = 0.08, 4.0   # xG/match prior, pseudo-appearances
         rates: dict[str, list] = {}
-        for tid, g in recent.groupby("team_id"):
+        for tid, g in recent.groupby("team_id", observed=True):
             # team appearance mass: one weight per distinct match
-            match_w = g.groupby("match_id").w.max()
+            match_w = g.groupby("match_id", observed=True).w.max()
             team_w_matches = float(match_w.sum())
             if team_w_matches <= 0:
                 continue
             rows = []
-            for player, pg in g.groupby("player"):
+            for player, pg in g.groupby("player", observed=True):
                 if (end - pg.date.max()).days > 200:
                     continue  # not seen recently -> likely departed
                 pxg = float((pg.xG * pg.w).sum())
-                p_match_w = pg.groupby("match_id").w.max()
+                p_match_w = pg.groupby("match_id", observed=True).w.max()
                 w_apps = float(p_match_w.sum())
                 apps = int(pg.match_id.nunique())
                 goals = int((pg.result == "Goal").sum())
@@ -600,6 +658,8 @@ class Store:
             rows.sort(key=lambda r: -r["xg_share"])
             rates[tid] = rows[:10]
         self.player_rates = rates
+        del shots, recent
+        gc.collect()
 
     # ---------- match-context scoring environments ----------
     def _fit_contexts(self):
@@ -629,7 +689,7 @@ class Store:
         for stem in ("FIFA World Cup", "Copa Am", "UEFA Euro", "African Cup", "AFC Asian Cup"):
             tm = m[(m.tournament.str.contains(stem.split()[0], na=False)) &
                    (~m.tournament.str.contains("qual", case=False, na=False))]
-            for _, g in tm.groupby(tm.date.dt.year):
+            for _, g in tm.groupby(tm.date.dt.year, observed=True):
                 if len(g) < 8:
                     continue
                 gg = g.sort_values("date")
@@ -724,7 +784,8 @@ def _bootstrap_download() -> None:
                 "SWE", "FIN", "IRL", "POL", "ROU", "RUS", "AUT", "SWZ"]
     today = _dt.date.today()
     last_start = today.year if today.month >= 7 else today.year - 1
-    seasons = [f"{y % 100:02d}{(y + 1) % 100:02d}" for y in range(2000, last_start + 1)]
+    first = max(2000, MIN_YEAR) if MIN_YEAR else 2000
+    seasons = [f"{y % 100:02d}{(y + 1) % 100:02d}" for y in range(first, last_start + 1)]
     for sub in ("club", "extra", "international", "elo"):
         (DATA / sub).mkdir(parents=True, exist_ok=True)
 
@@ -767,8 +828,10 @@ def get_store(force: bool = False) -> Store:
         except Exception:  # noqa: BLE001
             pass
     store = Store()
-    with open(CACHE, "wb") as fh:
-        pickle.dump((sig, store), fh)
+    if not LOW_MEM:
+        with open(CACHE, "wb") as fh:
+            pickle.dump((sig, store), fh)
+    gc.collect()
     return store
 
 
