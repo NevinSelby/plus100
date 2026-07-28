@@ -279,12 +279,13 @@ def _tsdb_team(team_id: str) -> dict:
     t = _team_or_404(team_id)
     with _logo_lock:
         cached = _logo_cache.get(team_id)
-    if isinstance(cached, dict) and "fanart" in cached:   # old entries lack imagery: refetch
+    if isinstance(cached, dict) and "colors" in cached:   # old entries lack fields: refetch
         return cached
     name = t["name"]
     entry = {"badge": cached.get("badge") if isinstance(cached, dict) else
              cached if isinstance(cached, str) else None,
-             "tsdb_name": None, "fanart": None, "stadium": None, "capacity": None}
+             "tsdb_name": None, "fanart": None, "stadium": None, "capacity": None,
+             "colors": []}
     try:
         r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
                          params={"t": name}, headers=UA, timeout=8)
@@ -296,7 +297,9 @@ def _tsdb_team(team_id: str) -> dict:
             entry = {"badge": best.get("strBadge"), "tsdb_name": best.get("strTeam"),
                      "fanart": best.get("strFanart1") or best.get("strBanner"),
                      "stadium": best.get("strStadium"),
-                     "capacity": best.get("intStadiumCapacity")}
+                     "capacity": best.get("intStadiumCapacity"),
+                     "colors": [c for c in (best.get("strColour1"), best.get("strColour2"))
+                                if c and c.startswith("#") and len(c) == 7]}
     except Exception:  # noqa: BLE001
         pass
     with _logo_lock:
@@ -309,7 +312,8 @@ def _tsdb_team(team_id: str) -> dict:
 def logo(team_id: str):
     e = _tsdb_team(team_id)
     return {"badge": e["badge"], "fanart": e.get("fanart"),
-            "stadium": e.get("stadium"), "capacity": e.get("capacity")}
+            "stadium": e.get("stadium"), "capacity": e.get("capacity"),
+            "colors": e.get("colors") or []}
 
 
 # ---------- probable lineups (squad data from TheSportsDB + our scorer model) ----------
