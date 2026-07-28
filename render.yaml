@@ -11,3 +11,7 @@ services:
         value: "3.12.7"
       - key: ODDS_API_KEY
         sync: false
+      - key: PLUS100_LOW_MEM
+        value: "1"
+      - key: PLUS100_MIN_YEAR
+        value: "2012"
