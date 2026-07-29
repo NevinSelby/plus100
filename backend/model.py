@@ -113,7 +113,12 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
             lh *= cs["scale"]
             la *= cs["scale"]
             ctx_info = {"context": context, "goals_multiplier": cs["scale"],
-                        "fitted": cs["fitted"], "sample": cs["n"]}
+                        "fitted": cs["fitted"], "sample": cs["n"], "applied": True}
+    elif context and context != "none":
+        # asked for a match type that does not exist for this kind of fixture
+        # (tournament stages are international-only, derbies are club-only)
+        ctx_info = {"context": context, "goals_multiplier": 1.0, "applied": False,
+                    "valid_for_this_match": list(valid)}
 
     lh = float(np.clip(lh, 0.15, 4.5))
     la = float(np.clip(la, 0.15, 4.5))
@@ -583,9 +588,16 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
     if eg.get("context"):
         ci = eg["context"]
         label = ci["context"].replace("_", " ")
-        basis = (f"fitted on {ci['sample']} historical matches" if ci["fitted"]
-                 else "research-based estimate, not fitted")
-        caveats.append(f"Match context '{label}': expected goals scaled x{ci['goals_multiplier']} ({basis}).")
+        if ci.get("applied"):
+            basis = (f"fitted on {ci['sample']} historical matches" if ci["fitted"]
+                     else "research-based estimate, not fitted")
+            caveats.append(f"Match context '{label}': expected goals scaled "
+                           f"x{ci['goals_multiplier']} ({basis}).")
+        else:
+            kind = ("a club" if rh["scope"] != "intl" or ra["scope"] != "intl"
+                    else "an international")
+            caveats.append(f"'{label.title()}' does not apply to {kind} fixture, so no goal "
+                           "adjustment was made. The numbers are the same as a regular match.")
     for side_adj, reg in ((adj_home, rh), (adj_away, ra)):
         for a in side_adj:
             caveats.append(f"Adjusted for {a['player']} OUT: {reg['name']}'s expected goals "
@@ -612,6 +624,7 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         "neutral_venue": neutral,
         "expected_goals": {"home": round(lh, 2), "away": round(la, 2)},
         "model_detail": eg["components"] | {"elo_diff": eg["elo_diff"], "uses_xg": eg["uses_xg"]},
+        "context_applied": eg.get("context"),
         "verdict": {"call": verdict, "confidence": round(max(n1x2["home"], n1x2["draw"], n1x2["away"]), 3),
                     "predicted_score": mk["correct_scores"][0]["score"]},
         "markets": mk,
