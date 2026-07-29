@@ -147,6 +147,35 @@ def next_gameweek(store: Store) -> dict:
     }
 
 
+def club_squad(store: Store, registry_id: str) -> list[dict]:
+    """Full CURRENT squad for a Premier League club from the FPL API — complete,
+    transfer-aware, with availability flags and photos. Empty list for non-PL teams."""
+    try:
+        boot = _get(f"{BASE}/bootstrap-static/")
+    except Exception:  # noqa: BLE001
+        return []
+    tmap = _team_map(store, boot["teams"])
+    fpl_id = next((fid for fid, v in tmap.items() if v["registry_id"] == registry_id), None)
+    if fpl_id is None:
+        return []
+    out = []
+    for e in boot["elements"]:
+        if e["team"] != fpl_id:
+            continue
+        if e["status"] in ("i", "s", "u", "n"):     # injured / suspended / gone
+            continue
+        out.append({
+            "name": e["web_name"],
+            "bucket": POS[e["element_type"]],
+            "pos": {"GK": "Goalkeeper", "DEF": "Defender",
+                    "MID": "Midfielder", "FWD": "Forward"}[POS[e["element_type"]]],
+            "minutes": e["minutes"], "price": e["now_cost"] / 10,
+            "sel": float(e["selected_by_percent"] or 0),
+            "img": f"https://resources.premierleague.com/premierleague/photos/players/250x250/p{e['code']}.png",
+        })
+    return out
+
+
 def _per90(e: dict, field: str) -> float:
     mins = e["minutes"]
     if mins < 400:
