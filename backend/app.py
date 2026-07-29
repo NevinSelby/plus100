@@ -797,6 +797,14 @@ def meta():
             "note": "Full model (Elo + xG-blended strengths) under live conditions vs closing odds; "
                     "calibration verified per decile on a 14,432-match walk-forward test.",
         },
+        "fantasy_eval": {
+            "pairs": 734,
+            "xg_only": 0.384, "record_only": 0.525, "blended": 0.543,
+            "note": "Rank correlation with what players actually scored the FOLLOWING "
+                    "season, measured on 734 real season-to-season pairs. Projecting from "
+                    "shot quality alone ranks players at 0.38; a player's own scoring "
+                    "record alone at 0.53; the shipped blend of both at 0.54.",
+        },
         "blend": {
             "market_weight": 0.75,
             "note": "Validated on 4,227 unseen matches: accuracy improves monotonically toward "
