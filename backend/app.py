@@ -18,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from .data_store import get_store, norm_key
+from .fpl import club_squad as fpl_squad
 from .model import expected_goals, likely_scorers, likely_scorers_club, predict
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -427,6 +428,10 @@ def _tsdb_squad(team_id: str) -> list[dict]:
                     })
     except Exception:  # noqa: BLE001
         return players
+    if not players:
+        # rate-limited or unknown team: never cache an empty squad, or a momentary
+        # throttle would freeze a keeper-less line-up in place for days
+        return players
     with _lineup_lock:
         _lineup_cache[team_id] = {"at": time.time(), "players": players}
         try:
@@ -496,6 +501,20 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
 
 _ROW_CAPS = {"GK": 1, "DEF": 5, "MID": 5, "FWD": 3}
 
+# Real shapes managers actually pick, in rough order of how common they are.
+# A line-up is only ever shown as one of these, so no 1-3-3 nonsense can appear.
+FORMATIONS = [(4, 3, 3), (4, 4, 2), (4, 2, 3, 1), (3, 5, 2), (4, 5, 1),
+              (3, 4, 3), (5, 3, 2), (5, 4, 1), (4, 1, 4, 1), (3, 4, 3)]
+
+
+def _pick_formation(n_def: int, n_mid: int, n_fwd: int) -> tuple[int, int, int] | None:
+    """The most conventional shape the available players can actually fill."""
+    for f in FORMATIONS:
+        d, m, fw = f[0], sum(f[1:-1]), f[-1]
+        if d <= n_def and m <= n_mid and fw <= n_fwd:
+            return d, m, fw
+    return None
+
 
 def _team_lineup(tid: str, lam: float) -> dict:
     t = _team_or_404(tid)
@@ -506,7 +525,18 @@ def _team_lineup(tid: str, lam: float) -> dict:
         scorers = likely_scorers(store, t["name"], lam)
     p_by_key = {norm_key(s["player"]): s["prob_to_score"] for s in scorers}
 
-    squad = [dict(p) for p in _tsdb_squad(tid)]
+    # Premier League clubs: the FPL API gives the COMPLETE current squad with
+    # positions, availability and minutes, so it beats the partial public feed.
+    squad, source = [], "public squad data"
+    if reg.get("scope") == "club":
+        try:
+            squad = [dict(p) for p in fpl_squad(store, tid)]
+        except Exception:  # noqa: BLE001
+            squad = []
+        if squad:
+            source = "the official Premier League squad list"
+    if not squad:
+        squad = [dict(p) for p in _tsdb_squad(tid)]
     have = {norm_key(p["name"]) for p in squad}
 
     def match_prob(name: str) -> float | None:
@@ -537,34 +567,64 @@ def _team_lineup(tid: str, lam: float) -> dict:
             squad.append(info)
             have.add(norm_key(info["name"]))
 
-    # drop players the news says are out (injury, suspension, transfer talk aside)
+    # drop players the news says are out — but never empty a position doing it,
+    # or a single injury headline can leave a side with no keeper or no striker
     outs = _news_absences(tid, [p["name"] for p in squad])
-    squad = [p for p in squad if p["name"] not in outs]
+    if outs:
+        kept, dropped = [], []
+        for p in squad:
+            (dropped if p["name"] in outs else kept).append(p)
+        for bucket in ("GK", "DEF", "MID", "FWD"):
+            need = {"GK": 1, "DEF": 3, "MID": 2, "FWD": 1}[bucket]
+            while sum(1 for p in kept if p["bucket"] == bucket) < need:
+                back = next((p for p in dropped if p["bucket"] == bucket), None)
+                if not back:
+                    break
+                dropped.remove(back)
+                kept.append(back)
+                outs = [n for n in outs if n != back["name"]]
+        squad = kept
 
-    rows: dict[str, list] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
+    # Rank each position by who is likeliest to start: scoring share first (that is
+    # our model talking), then real playing time, then ownership as a tiebreak.
+    pool: dict[str, list] = {"GK": [], "DEF": [], "MID": [], "FWD": []}
     for p in squad:
-        rows[p["bucket"]].append(p)
-    for b, cap in _ROW_CAPS.items():
-        rows[b].sort(key=lambda p: (-(p.get("p_score") or 0), p.get("img") is None,
-                                    _pos_x_order(p["pos"]), p["name"]))
-        rows[b] = rows[b][:cap]
+        pool[p["bucket"]].append(p)
+    for b in pool:
+        pool[b].sort(key=lambda p: (-(p.get("p_score") or 0), -(p.get("minutes") or 0),
+                                    -(p.get("sel") or 0), p.get("img") is None, p["name"]))
+
+    shape = _pick_formation(len(pool["DEF"]), len(pool["MID"]), len(pool["FWD"]))
+    partial = shape is None or not pool["GK"]
+    if shape is None:
+        # not enough known players for a real shape: show whoever we do know,
+        # capped per position, rather than inventing a formation
+        counts = {"DEF": min(len(pool["DEF"]), 5), "MID": min(len(pool["MID"]), 5),
+                  "FWD": min(len(pool["FWD"]), 3)}
+    else:
+        counts = {"DEF": shape[0], "MID": shape[1], "FWD": shape[2]}
+
+    rows = {"GK": pool["GK"][:1]}
+    for b in ("DEF", "MID", "FWD"):
+        rows[b] = pool[b][:counts[b]]
+    for b in rows:
         rows[b].sort(key=lambda p: (_pos_x_order(p["pos"]), p["name"]))
-    # trim to 11 by dropping from the largest outfield rows first
-    while sum(len(v) for v in rows.values()) > 11:
-        biggest = max(("DEF", "MID", "FWD"), key=lambda b: len(rows[b]))
-        rows[biggest].pop()
 
     players = []
     for ri, b in enumerate(("GK", "DEF", "MID", "FWD")):
         n = len(rows[b])
         for si, p in enumerate(rows[b]):
             players.append({**p, "row": ri, "slot": si, "n": n})
+    n_total = sum(len(v) for v in rows.values())
     return {
         "id": tid, "name": t["name"], "badge": _tsdb_team(tid)["badge"],
-        "formation": "-".join(str(len(rows[b])) for b in ("DEF", "MID", "FWD")),
+        "formation": ("-".join(str(len(rows[b])) for b in ("DEF", "MID", "FWD"))
+                      if not partial else None),
         "players": players,
-        "known": sum(len(v) for v in rows.values()),
-        "gk_missing": len(rows["GK"]) == 0,
+        "known": n_total,
+        "complete": n_total == 11 and len(rows["GK"]) == 1 and shape is not None,
+        "gk_missing": not pool["GK"],
+        "source": source,
         "outs": outs,
     }
 
@@ -575,12 +635,15 @@ def lineup(home: str, away: str, neutral: bool = False):
     our model's scoring shares. These are LIKELY players, not confirmed team sheets."""
     _require_store()
     eg = expected_goals(store, home, away, neutral=neutral)
+    h = _team_lineup(home, eg["lambda_home"])
+    a = _team_lineup(away, eg["lambda_away"])
+    srcs = sorted({h["source"], a["source"]})
     return {
-        "home": _team_lineup(home, eg["lambda_home"]),
-        "away": _team_lineup(away, eg["lambda_away"]),
-        "note": ("Built from public squad data ranked by each player's share of his "
-                 "team's expected goals. Real team sheets drop about an hour before "
-                 "kickoff and can differ."),
+        "home": h, "away": a,
+        "note": (f"Built from {' and '.join(srcs)}, ranked by playing time and each "
+                 "player's share of his team's expected goals, then arranged in the "
+                 "most likely formation those players can field. Real team sheets drop "
+                 "about an hour before kickoff and can differ."),
     }
 
 
