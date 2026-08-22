@@ -2,253 +2,94 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Plus100: Football Prediction App</title>
-<meta name="theme-color" content="#0F1522">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plus100 · Football predictions</title>
+<link rel="icon" href="/static/icon-192.png">
 <link rel="manifest" href="/static/manifest.json">
-<link rel="apple-touch-icon" href="/static/icon-192.png">
-<meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=24">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css?v=30">
 </head>
 <body>
-<div class="grain"></div>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><div class="mark">+</div><div class="name">Plus100</div></div>
+    <nav class="nav" id="nav">
+      <button data-page="predict" class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg><span>Predict</span></button>
+      <button data-page="market"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 20V10M12 20V4M20 20v-7"/></svg><span>Vs Market</span></button>
+      <button data-page="parlays"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2l9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg><span>Parlays</span></button>
+      <button data-page="fantasy"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="8" r="5"/><path d="M9 13l-2 8 5-3 5 3-2-8"/></svg><span>Fantasy</span></button>
+      <button data-page="about"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>About</span></button>
+    </nav>
+    <div class="side-foot"><span class="dot" id="srvdot"></span><span id="srvtxt">connecting…</span><div id="datastamp"></div></div>
+  </aside>
 
-<header class="masthead compact">
-  <div class="wordmark">Plus<span>100</span> <span class="build-tag">v24</span></div>
-  <div class="meta-strip" id="metaStrip">loading…</div>
-</header>
-
-<nav class="app-nav" id="appNav">
-  <button class="nav-btn active" data-view="predict"><span class="nav-ico">◎</span>Predict</button>
-  <button class="nav-btn" data-view="value"><span class="nav-ico">▲</span>Best Bets</button>
-  <button class="nav-btn" data-view="about"><span class="nav-ico">ⓘ</span>About</button>
-</nav>
-
-<main>
-  <!-- ===================== PREDICT view ===================== -->
-  <section class="view active" id="view-predict">
-
-    <!-- soccer: full model flow -->
-    <div id="soccerPredict">
-      <section class="picker-stage">
-        <div class="pitch-lines" aria-hidden="true"></div>
-        <div class="picker-row">
-          <div class="team-slot" id="slotHome">
-            <div class="slot-label">HOME</div>
-            <div class="badge-ring"><img class="badge" id="badgeHome" alt="" hidden><div class="badge-empty" id="emptyHome">?</div></div>
-            <div class="combo">
-              <input id="inputHome" class="team-input" type="text" placeholder="Search any team…" autocomplete="off" spellcheck="false">
-              <div class="dropdown" id="dropHome"></div>
+  <main class="main">
+    <!-- ============ PREDICT ============ -->
+    <section class="page on" id="page-predict">
+      <h1>Call any match on the planet</h1>
+      <p class="sub" id="tagline">Probabilities for every football match, from 154,000 games of history, live team news and each side's probable players.</p>
+      <div class="grid2">
+        <div>
+          <div class="card">
+            <div class="slots">
+              <div class="slot" id="slot-home">
+                <label>HOME</label>
+                <div class="pick"><img class="badge" hidden><input placeholder="Search any team…" autocomplete="off"></div>
+                <div class="meta"></div><div class="dd" hidden></div>
+              </div>
+              <div class="vs">VS</div>
+              <div class="slot" id="slot-away">
+                <label>AWAY</label>
+                <div class="pick"><img class="badge" hidden><input placeholder="Search any team…" autocomplete="off"></div>
+                <div class="meta"></div><div class="dd" hidden></div>
+              </div>
             </div>
-            <div class="slot-sub" id="subHome">&nbsp;</div>
-          </div>
-
-          <div class="vs-block">
-            <div class="vs">VS</div>
-            <label class="neutral-toggle">
-              <input type="checkbox" id="neutralChk">
-              <span class="toggle-track"><span class="toggle-thumb"></span></span>
-              neutral venue
-            </label>
-            <select class="combo-sel ctx-sel" id="ctxSel" title="What kind of match is this? Adjusts the scoring environment (fitted from history).">
-              <option value="none">regular match</option>
-              <option value="friendly">friendly (intl)</option>
-              <option value="qualifier">qualifier (intl)</option>
-              <option value="finals">tournament stage (intl)</option>
-              <option value="third_place">third-place playoff</option>
-              <option value="final">the final</option>
-              <option value="dead_rubber">dead rubber (club)</option>
-              <option value="derby">derby (club)</option>
-            </select>
-            <button class="predict-btn" id="predictBtn" disabled>PREDICT</button>
-          </div>
-
-          <div class="team-slot" id="slotAway">
-            <div class="slot-label">AWAY</div>
-            <div class="badge-ring away"><img class="badge" id="badgeAway" alt="" hidden><div class="badge-empty" id="emptyAway">?</div></div>
-            <div class="combo">
-              <input id="inputAway" class="team-input" type="text" placeholder="Search any team…" autocomplete="off" spellcheck="false">
-              <div class="dropdown" id="dropAway"></div>
+            <div class="controls">
+              <button class="btn" id="go" disabled>⚡ Predict this match</button>
+              <label class="check"><input type="checkbox" id="neutral" checked> neutral venue</label>
             </div>
-            <div class="slot-sub" id="subAway">&nbsp;</div>
+            <div class="chips" id="ctxchips"></div>
+            <div class="ctx-note" id="ctxnote"></div>
           </div>
+          <div id="results"></div>
         </div>
-      </section>
-
-      <div class="loading" id="loading" hidden>
-        <div class="ball"></div><span>crunching 250,000 matches…</span>
+        <div class="rail">
+          <h3 class="sec">Kicking off soon <span class="note" id="fxnote">live schedule</span></h3>
+          <div id="fixtures"><div class="loading"><div class="ball">⚽</div>fetching the real schedule…</div></div>
+        </div>
       </div>
-
-      <section id="results" hidden>
-        <div class="verdict-banner reveal" id="verdictBanner">
-          <div class="verdict-side">
-            <div class="verdict-eyebrow">PREDICTION</div>
-            <div class="verdict-call" id="verdictCall"></div>
-            <div class="verdict-conf" id="verdictConf"></div>
-          </div>
-          <div class="verdict-score">
-            <div class="verdict-eyebrow">MOST LIKELY SCORE</div>
-            <div class="big-score" id="bigScore"></div>
-            <div class="xg-line" id="xgLine"></div>
-          </div>
-        </div>
-
-        <div class="prob-bar-wrap reveal">
-          <div class="prob-labels"><span id="plH"></span><span id="plD"></span><span id="plA"></span></div>
-          <div class="prob-bar"><div class="seg home" id="segH"></div><div class="seg draw" id="segD"></div><div class="seg away" id="segA"></div></div>
-          <div class="fair-odds" id="fairOdds"></div>
-        </div>
-
-        <div class="caveats" id="caveats"></div>
-
-        <div class="grid-2">
-          <div class="panel reveal">
-            <h3>SCORELINE CHANCES <span class="pill-note">darker = more likely</span></h3>
-            <div class="heatmap-wrap">
-              <div class="heatmap" id="heatmap"></div>
-              <div class="axis-label x">away goals →</div>
-            </div>
-            <div class="top-scores" id="topScores"></div>
-          </div>
-
-          <div class="panel reveal">
-            <h3>ALL BET TYPES <span class="pill-note">our honest odds for every market</span></h3>
-            <div class="market-grid" id="marketGrid"></div>
-          </div>
-        </div>
-
-        <div class="grid-2" id="scorersRow" hidden>
-          <div class="panel reveal"><h3 id="scorersHomeTitle"></h3><div id="scorersHome"></div></div>
-          <div class="panel reveal"><h3 id="scorersAwayTitle"></h3><div id="scorersAway"></div></div>
-        </div>
-
-        <div class="grid-2">
-          <div class="panel reveal">
-            <h3>HEAD TO HEAD</h3>
-            <div class="h2h-summary" id="h2hSummary"></div>
-            <table class="meetings" id="meetings"></table>
-          </div>
-          <div class="panel reveal">
-            <h3>FORM <span class="pill-note">newest first</span></h3>
-            <div class="form-block" id="formHome"></div>
-            <div class="form-block" id="formAway"></div>
-            <h3 class="mt">TEAM STRENGTH OVER TIME</h3>
-            <canvas id="eloChart" width="560" height="180"></canvas>
-          </div>
-        </div>
-
-        <div class="panel reveal" id="parlayLab">
-          <h3>PARLAYS <span class="pill-note">ready-made combos with honest prices</span></h3>
-          <p class="combo-hint">Each card is a combo bet. It shows how often it hits and the
-            <b>minimum payout worth taking</b>. Build the same combo in your betting app: if their payout is
-            <b>higher</b> than the card's number, it's a good bet. If lower, skip. On 4+ leg parlays, apply
-            Hard Rock's Parlay Boost before comparing. Tap a card to customize it.</p>
-          <div id="parlaySuggest"></div>
-          <div id="parlayChips"></div>
-          <div id="parlayOut"></div>
-        </div>
-
-        <div class="grid-2">
-          <div class="panel reveal"><h3 id="newsHomeTitle">TEAM NEWS</h3><div id="newsHome"></div></div>
-          <div class="panel reveal"><h3 id="newsAwayTitle">TEAM NEWS</h3><div id="newsAway"></div></div>
-        </div>
-
-        <div class="panel reveal">
-          <h3>FAN CHATTER <span class="pill-note">for context, not used in predictions</span></h3>
-          <div id="buzz"></div>
-        </div>
-      </section>
-    </div>
-
-  </section>
-
-  <!-- ===================== BEST BETS view ===================== -->
-  <section class="view" id="view-value">
-    <section class="panel scanner" id="scannerPanel">
-      <h3>BEST BETS <span class="pill-note">soccer · powered by the full model</span></h3>
-      <p class="combo-hint">With a match picked on the Predict tab, this grades <b>every bet type on that game</b>
-        and tells you which (if any) are worth money. With no match picked, it sweeps everything in the
-        next 2 days. Gold = good bet. Everything else = skip.</p>
-      <button class="predict-btn small" id="bestBetsBtn">FIND BEST BETS</button>
-      <span class="scan-status" id="bbStatus"></span>
-      <div id="bestBetsOut"></div>
-
-      <h3 class="mt">FREE-MONEY SCANNER <span class="pill-note">books disagreeing with each other</span></h3>
-      <p class="combo-hint">Rare, but real: when two books price the same game differently enough, covering both
-        sides guarantees profit. This checks every soccer game in the next 2 days. For other sports, open a game
-        on the Predict tab, where its price table flags the same thing.</p>
-      <div class="scan-controls">
-        <input class="odds-in scan-key" id="scanKey" type="password" placeholder="The Odds API key (saved)">
-        <button class="predict-btn small" id="scanBtn">SCAN NOW</button>
-        <label class="neutral-toggle"><input type="checkbox" id="scanAuto">
-          <span class="toggle-track"><span class="toggle-thumb"></span></span> auto-rescan 5 min</label>
-        <span class="scan-status" id="scanStatus"></span>
-      </div>
-      <div id="scanOut"></div>
     </section>
-  </section>
 
-  <!-- ===================== ABOUT / DISCLAIMER view ===================== -->
-  <section class="view" id="view-about">
-    <div class="panel">
-      <h3>WHAT Plus100 IS (AND ISN'T)</h3>
-      <p class="about-text">Plus100 is a statistics tool. It estimates the <b>probability</b> of football outcomes
-        from historical data and compares those probabilities against sportsbook prices. It is not a sportsbook,
-        does not accept bets, and has no connection to any gambling operator.</p>
+    <!-- ============ VS MARKET ============ -->
+    <section class="page" id="page-market">
+      <h1>Bookmakers vs our model</h1>
+      <p class="sub">Live prices from about 15 US sportsbooks, de-vigged to reveal the probability they believe, next to ours. A green card means the best price pays more than the combined estimate justifies. No green card means no good bet exists today, and skipping is the right move.</p>
+      <button class="btn" id="sweep">Scan the next two days</button>
+      <div id="marketout"></div>
+    </section>
 
-      <h3 class="mt">PROBABILITIES ARE NOT PREDICTIONS OF CERTAINTY</h3>
-      <p class="about-text">Every number in this app is a probability, never a promise. A 60% chance means the
-        outcome <b>fails 4 times out of 10</b>. Even the strongest "good bet" this app ever flags is expected to
-        lose regularly. A positive edge only shows up as profit across <b>many</b> bets, and can take hundreds of
-        bets to overcome normal luck. There is no such thing as a 100% win rate, here or anywhere.</p>
+    <!-- ============ PARLAYS ============ -->
+    <section class="page" id="page-parlays">
+      <h1>Parlay builds</h1>
+      <p class="sub">True combined chances from 150,000 simulations of your selected match. Build the combo in your book and take it only if their payout beats the "take if" number. Pick a match on the Predict page first.</p>
+      <div id="parlayout"></div>
+    </section>
 
-      <h3 class="mt">MEASURED, HONEST ACCURACY</h3>
-      <p class="about-text" id="aboutAccuracy">In testing on thousands of held-out matches, this model picks the
-        correct result about as often as the sportsbooks themselves (roughly half the time), and its
-        probabilities are calibrated: when it says 40%, that outcome happens about 40% of the time.
-        That is the realistic ceiling of football prediction, for anyone.</p>
+    <!-- ============ FANTASY ============ -->
+    <section class="page" id="page-fantasy">
+      <h1 id="fpl-title">Fantasy</h1>
+      <p class="sub">Expected points for every player against their actual opponent this gameweek. The pitch shows the best squad that passes every FPL rule at live prices: £100m across 15 players, max three per club, legal formations. Click a player to swap him.</p>
+      <div id="fplout"><div class="loading"><div class="ball">⚽</div>loading the gameweek…</div></div>
+    </section>
 
-      <h3 class="mt">WHERE THE EDGE REALLY COMES FROM</h3>
-      <p class="about-text">We tested it directly: against <b>closing</b> prices, nothing predicts more accurately than the betting market itself, this model included (validated on 4,227 unseen matches).
-        So Plus100 anchors 80% to the market consensus and hunts its edges where they actually live:
-        <b>prices that differ between books</b>, softer early prices, line moves that lock profits, and
-        mispriced combos, not in out-predicting the bookmakers.</p>
-
-      <h3 class="mt">KNOWN LIMITS</h3>
-      <p class="about-text">The model cannot know lineups, late injuries, motivation, or weather unless you
-        enter them (use the OUT buttons on scorer rows). Odds come from a third-party feed and can lag the
-        sportsbook apps by minutes. Match data <b>refreshes itself every 6 hours</b>; the date at the top
-        of the page shows exactly how current the ratings are.</p>
-
-      <h3 class="mt">NO LIABILITY</h3>
-      <p class="about-text">You alone decide whether, where, and how much to bet. Plus100 and its author accept
-        <b>no responsibility for any losses</b>, missed profits, or decisions made using this app. Nothing here
-        is financial advice. Use it only where sports betting is legal for you, and only if you are of legal
-        betting age.</p>
-
-      <h3 class="mt">BET RESPONSIBLY</h3>
-      <p class="about-text">Never stake money you cannot afford to lose. Set a bankroll, stake small fractions
-        of it (the app's ¼-Kelly suggestions are already conservative caps, not targets), and stop if it stops
-        being fun. If gambling is causing you problems, call
-        <a href="https://www.ncpgambling.org" target="_blank" rel="noopener">1-800-GAMBLER</a>. Free,
-        confidential, 24/7.</p>
-    </div>
-  </section>
-</main>
-
-<footer>
-  <div class="footer-model" id="footerModel"></div>
-  <div class="footer-warning">
-    <strong>Bet responsibly.</strong> No prediction is a guarantee. Even the best models lose almost half
-    their calls, and small edges only pay off over many bets. Never stake money you cannot afford to lose.
-    Problem gambling help: <a href="https://www.ncpgambling.org" target="_blank" rel="noopener">1-800-GAMBLER</a>.
-  </div>
-</footer>
-
-<script src="/static/app.js?v=24"></script>
+    <!-- ============ ABOUT ============ -->
+    <section class="page" id="page-about">
+      <h1>What Plus100 is (and isn't)</h1>
+      <div class="card" id="aboutout"></div>
+    </section>
+  </main>
+</div>
+<script src="/static/app.js?v=30"></script>
 </body>
 </html>
