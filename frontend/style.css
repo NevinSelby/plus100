@@ -185,9 +185,13 @@ td.num, th.num { text-align: right; }
 .err { color: var(--red); margin-top: 12px; }
 .loading { display: flex; flex-direction: column; align-items: center; gap: 10px;
   padding: 30px 0; color: var(--dim); }
-.ball { font-size: 34px; animation: bounce .9s cubic-bezier(.5,.05,.5,1) infinite; }
-@keyframes bounce { 0%,100% { transform: translateY(-14px) rotate(0deg); }
-  50% { transform: translateY(2px) rotate(120deg); } }
+.ball { animation: drop .86s cubic-bezier(.5,.05,.5,1) infinite; line-height: 0; }
+@keyframes drop { 0%, 100% { transform: translateY(-18px) rotate(0deg); }
+  50% { transform: translateY(0) rotate(140deg); } }
+.ballshadow { width: 28px; height: 5px; border-radius: 50%; background: #1A2B1E;
+  margin-top: 5px; animation: land .86s cubic-bezier(.5,.05,.5,1) infinite; }
+@keyframes land { 0%, 100% { transform: scaleX(.45); opacity: .15; }
+  50% { transform: scaleX(1.15); opacity: .4; } }
 .count { font-variant-numeric: tabular-nums; }
 .heat td { text-align: center; border: 0; padding: 4px; font-size: 12px; font-weight: 600; }
 .heat .cell { border-radius: 7px; padding: 7px 0; }
@@ -227,7 +231,7 @@ td.num, th.num { text-align: right; }
 .btn:active, .fx:active, .chip:active, .mathbtn:active { transform: scale(.97); }
 h3.sec svg { width: 16px; height: 16px; stroke: var(--muted); flex-shrink: 0; }
 @media (prefers-reduced-motion: reduce) {
-  .a-rise, .a-pop, .a-tilt, .ball svg { animation: none !important; }
+  .a-rise, .a-pop, .a-tilt, .ball, .ballshadow { animation: none !important; }
 }
 
 /* ---------- the math modal ---------- */
