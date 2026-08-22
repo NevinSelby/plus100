@@ -830,3 +830,81 @@ def index():
     # always revalidate the page itself; versioned ?v= query strings handle JS/CSS
     return FileResponse(ROOT / "frontend" / "index.html",
                         headers={"Cache-Control": "no-cache"})
+
+
+# ---------- upcoming fixtures (same source as our match history) ----------
+
+_fixtures_cache: dict = {}
+_FIXTURES_TTL = 1800          # 30 min
+
+# division codes in rough order of interest
+_DIV_RANK = {"E0": 0, "SP1": 1, "I1": 2, "D1": 3, "F1": 4, "N1": 5, "P1": 6,
+             "B1": 7, "T1": 8, "SC0": 9, "E1": 10}
+
+
+@app.get("/api/fixtures/upcoming")
+def upcoming_fixtures(days: int = 7, limit: int = 40):
+    """Real upcoming matches from football-data.co.uk — the same feed our match
+    history comes from, so every team name maps straight onto the model."""
+    _require_store()
+    days = max(1, min(days, 14))
+    key = f"up:{days}:{limit}"
+    hit = _fixtures_cache.get(key)
+    if hit and time.time() - hit[0] < _FIXTURES_TTL:
+        return hit[1]
+
+    import csv
+    import io as _io
+    from datetime import datetime, timedelta
+
+    try:
+        r = requests.get("https://www.football-data.co.uk/fixtures.csv",
+                         headers=UA, timeout=12)
+        r.raise_for_status()
+        text = r.content.decode("utf-8-sig", errors="replace")
+    except Exception:  # noqa: BLE001
+        raise HTTPException(503, "The fixtures feed is not answering right now; try again in a minute.")
+
+    by_name = {norm_key(reg["name"]): tid for tid, reg in store.registry.items()
+               if reg["scope"] == "club"}
+    from .data_store import LEAGUE_NAMES
+
+    now = datetime.utcnow()
+    horizon = now + timedelta(days=days)
+    out = []
+    for row in csv.DictReader(_io.StringIO(text)):
+        div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
+        if not div or not hn or not an:
+            continue
+        try:
+            ko = datetime.strptime(f"{row['Date']} {row.get('Time') or '15:00'}",
+                                   "%d/%m/%Y %H:%M")
+        except (ValueError, KeyError):
+            continue
+        if ko < now - timedelta(hours=3) or ko > horizon:
+            continue
+        hid, aid = by_name.get(norm_key(hn)), by_name.get(norm_key(an))
+        if not hid or not aid:
+            continue
+        league, country = LEAGUE_NAMES.get(div, (div, ""))
+        try:
+            odds = {"home": float(row["AvgH"]), "draw": float(row["AvgD"]),
+                    "away": float(row["AvgA"])}
+        except (TypeError, ValueError, KeyError):
+            odds = None
+        out.append({
+            "home_id": hid, "away_id": aid,
+            "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
+            "home_elo": store.registry[hid]["elo_global"],
+            "away_elo": store.registry[aid]["elo_global"],
+            "league": league, "country": country,
+            "kickoff": ko.strftime("%Y-%m-%dT%H:%M"),
+            "odds": odds,
+            "rank": _DIV_RANK.get(div, 20),
+        })
+    out.sort(key=lambda f: (f["rank"], f["kickoff"]))
+    payload = {"fixtures": out[:limit], "count": len(out),
+               "note": ("Confirmed fixtures from the leagues this model is built on. "
+                        "Kick-off times are UK time.")}
+    _fixtures_cache[key] = (time.time(), payload)
+    return payload
