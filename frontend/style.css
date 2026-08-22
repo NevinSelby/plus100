@@ -215,3 +215,35 @@ td.num, th.num { text-align: right; }
   .slots { grid-template-columns: 1fr 40px 1fr; }
   .hero .pct { font-size: 28px; }
 }
+
+/* ---------- motion, ported from the app ---------- */
+.a-rise { animation: rise .5s cubic-bezier(.2,.7,.3,1) both; }
+@keyframes rise { from { opacity: 0; transform: translateY(18px); } to { opacity: 1; transform: none; } }
+.a-pop { animation: pop .5s cubic-bezier(.34,1.56,.64,1) both; }
+@keyframes pop { from { opacity: 0; transform: scale(0); } to { opacity: 1; transform: scale(1); } }
+.a-tilt { animation: tilt .75s cubic-bezier(.2,.7,.3,1) both; transform-origin: 50% 100%; }
+@keyframes tilt { from { opacity: 0; transform: perspective(850px) rotateX(22deg) translateY(24px); }
+  to { opacity: 1; transform: none; } }
+.btn:active, .fx:active, .chip:active, .mathbtn:active { transform: scale(.97); }
+h3.sec svg { width: 16px; height: 16px; stroke: var(--muted); flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .a-rise, .a-pop, .a-tilt, .ball svg { animation: none !important; }
+}
+
+/* ---------- the math modal ---------- */
+.mathbtn { display: inline-flex; align-items: center; gap: 8px; margin-top: 16px;
+  border: 1px solid rgba(255,255,255,.4); border-radius: 12px; padding: 10px 16px;
+  color: #fff; font-weight: 700; font-size: 13.5px; }
+.mathbtn svg { width: 15px; height: 15px; stroke: #fff; }
+.overlay { position: fixed; inset: 0; background: rgba(10,18,12,.55); z-index: 90;
+  display: grid; place-items: center; padding: 24px; }
+.modal { background: var(--panel); border-radius: 18px; max-width: 780px; width: 100%;
+  max-height: 88vh; overflow: auto; padding: 28px 30px; box-shadow: var(--shadow); }
+.modal h2 { font-size: 21px; letter-spacing: -.4px; margin-bottom: 4px; }
+.modal .step { color: var(--green-deep); font-weight: 800; font-size: 13.5px;
+  letter-spacing: .3px; margin: 22px 0 6px; display: flex; align-items: center; gap: 8px; }
+.modal .step svg { width: 15px; height: 15px; stroke: var(--green-deep); }
+.modal p { color: var(--dim); margin-bottom: 10px; }
+.modal b.k { color: var(--green-deep); }
+.modal .x { float: right; color: var(--muted); font-size: 22px; line-height: 1;
+  padding: 4px 8px; }
