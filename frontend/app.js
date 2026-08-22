@@ -23,6 +23,7 @@ Object.assign(ICONS, {
   dollar: FE('<path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>'),
   userx: FE('<path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M18 8l5 5M23 8l-5 5"/>'),
 });
+const LOADER = (label) => `<div class="loading"><div class="ball">${ICONS.ball}</div><div class="ballshadow"></div>${label}</div>`;
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
 const api = (p, q) => fetch(p + (q ? "?" + new URLSearchParams(q) : ""))
@@ -233,7 +234,7 @@ async function loadFixtures() {
 /* ---- prediction flow ---- */
 async function predictNow() {
   const out = $("#results");
-  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>replaying 154,000 matches of history…</div>`;
+  out.innerHTML = LOADER("replaying 154,000 matches of history…");
   const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
   try {
     await Promise.allSettled([logoWaits.home, logoWaits.away]);
@@ -451,7 +452,7 @@ function openMath(p) {
 /* ---- vs market ---- */
 $("#sweep").onclick = async () => {
   const out = $("#marketout");
-  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>shopping 15 sportsbooks for prices…</div>`;
+  out.innerHTML = LOADER("shopping 15 sportsbooks for prices…");
   try {
     const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
     const d = await api("/api/bestbets", params);
@@ -485,7 +486,7 @@ $("#sweep").onclick = async () => {
 async function loadParlays() {
   const out = $("#parlayout");
   if (!S.home || !S.away) { out.innerHTML = `<div class="card mini">Pick a match on the Predict page first, then come back here.</div>`; return; }
-  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>simulating this match 150,000 times…</div>`;
+  out.innerHTML = LOADER("simulating this match 150,000 times…");
   try {
     const list = await api("/api/parlay/suggest", { home: S.home.id, away: S.away.id,
       neutral: $("#neutral").checked, context: S.context });
