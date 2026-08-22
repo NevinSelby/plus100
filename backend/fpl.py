@@ -330,6 +330,43 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
                     if p["pos"] == weakest["pos"] and p["price"] <= weakest["price"] + 0.5
                     and p["xpts"] > weakest["xpts"] + 0.5
                     and p["id"] not in {q["id"] for q in squad}][:3]
+    # One free transfer per gameweek is the rule; extras cost 4 points. So the
+    # advice engine scans every legal, affordable swap and recommends AT MOST one,
+    # and only when the projected gain clearly beats doing nothing.
+    bank = (picks.get("entry_history") or {}).get("bank", 0) / 10.0
+    squad_ids = {p["id"] for p in squad}
+    best = None
+    for out_p in squad:
+        for cand in gw_data["players"]:
+            if cand["pos"] != out_p["pos"] or cand["id"] in squad_ids:
+                continue
+            if cand["price"] > out_p["price"] + bank + 1e-9:     # money restriction
+                continue
+            others = [q for q in squad if q["id"] != out_p["id"]]
+            if sum(1 for q in others if q["team"] == cand["team"]) >= 3:
+                continue                                          # 3-per-club rule
+            gain = cand["xpts"] - out_p["xpts"]
+            if best is None or gain > best["gain"]:
+                best = {"out": out_p["name"], "out_xpts": out_p["xpts"],
+                        "in": cand["name"], "in_xpts": cand["xpts"],
+                        "gain": round(gain, 2),
+                        "cost_delta": round(cand["price"] - out_p["price"], 1)}
+    GAIN_BAR = 0.7      # below this, projection noise; keep the free transfer banked
+    if best and best["gain"] >= GAIN_BAR:
+        advice = {"action": "transfer", **best,
+                  "reason": (f"Use your free transfer: {best['out']} "
+                             f"({best['out_xpts']} xPts) out, {best['in']} "
+                             f"({best['in_xpts']} xPts) in — {best['gain']} more projected "
+                             f"points this week, within your budget (£{bank:.1f}m banked). "
+                             "Only one transfer is free; extras cost 4 points, so no "
+                             "second change is ever suggested.")}
+    else:
+        advice = {"action": "hold",
+                  "reason": ((f"The best affordable swap gains only "
+                              f"{best['gain']:.1f} projected points — inside projection "
+                              "noise. ") if best else
+                             "No affordable, rule-legal upgrade exists this week. ")
+                            + "Bank the free transfer; it rolls over."}
     return {
         "entry_name": entry.get("name"), "manager": f'{entry.get("player_first_name", "")} {entry.get("player_last_name", "")}'.strip(),
         "gameweek": gw, "squad": squad,
@@ -337,4 +374,9 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
         "projected_points": xi_total,
         "weakest_starter": weakest["name"] if weakest else None,
         "upgrade_ideas": upgrades,
+        "bank": bank,
+        "transfer_advice": advice,
+        "advice_note": ("Prices here are current buy prices; your personal selling "
+                        "prices can differ by up to £0.5m, so double-check in the "
+                        "official app before confirming."),
     }
