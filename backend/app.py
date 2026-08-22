@@ -537,6 +537,18 @@ def _team_lineup(tid: str, lam: float) -> dict:
             source = "the official Premier League squad list"
     if not squad:
         squad = [dict(p) for p in _tsdb_squad(tid)]
+        # the public feed lags transfers: drop anyone whose CURRENT club, per a
+        # per-player lookup (cached on disk), is verifiably somewhere else
+        if reg.get("scope") == "club":
+            verified = []
+            for p in squad:
+                cur = _player_current_team(p["name"])
+                if cur and norm_key(cur) != norm_key(t["name"]) \
+                        and norm_key(t["name"]) not in norm_key(cur):
+                    continue
+                verified.append(p)
+            if len(verified) >= 4:      # keep the filter only when it leaves a core
+                squad = verified
     have = {norm_key(p["name"]) for p in squad}
 
     def match_prob(name: str) -> float | None:
@@ -609,20 +621,27 @@ def _team_lineup(tid: str, lam: float) -> dict:
         rows[b] = pool[b][:counts[b]]
     for b in rows:
         rows[b].sort(key=lambda p: (_pos_x_order(p["pos"]), p["name"]))
+    # pad to a full, honest eleven: unnamed spots become explicit "Unknown" chips
+    target = {"GK": 1, "DEF": counts["DEF"] if shape else 4,
+              "MID": counts["MID"] if shape else 3, "FWD": counts["FWD"] if shape else 3}
+    n_known = sum(len(v) for v in rows.values())
+    for b, want in target.items():
+        while len(rows[b]) < want:
+            rows[b].append({"name": "Unknown", "pos": "Not named in the public feed",
+                            "bucket": b, "img": None, "p_score": None, "placeholder": True})
 
     players = []
     for ri, b in enumerate(("GK", "DEF", "MID", "FWD")):
         n = len(rows[b])
         for si, p in enumerate(rows[b]):
             players.append({**p, "row": ri, "slot": si, "n": n})
-    n_total = sum(len(v) for v in rows.values())
     return {
         "id": tid, "name": t["name"], "badge": _tsdb_team(tid)["badge"],
         "formation": ("-".join(str(len(rows[b])) for b in ("DEF", "MID", "FWD"))
                       if not partial else None),
         "players": players,
-        "known": n_total,
-        "complete": n_total == 11 and len(rows["GK"]) == 1 and shape is not None,
+        "known": n_known,
+        "complete": n_known == 11 and shape is not None,
         "gk_missing": not pool["GK"],
         "source": source,
         "outs": outs,
