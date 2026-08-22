@@ -1,653 +1,586 @@
-/* Plus100 frontend */
+/* Plus100 web app. Same brain as the phone app, desktop presentation. */
 "use strict";
+const $ = (s, r) => (r || document).querySelector(s);
+const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
+const api = (p, q) => fetch(p + (q ? "?" + new URLSearchParams(q) : ""))
+  .then(r => { if (!r.ok) throw new Error("server error " + r.status); return r.json(); });
+const h = (tag, cls, html) => { const e = document.createElement(tag);
+  if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const pct = (x, d=1) => (x * 100).toFixed(d) + "%";
+const odds = (x) => (x && isFinite(x) && x > 1) ? Number(x).toFixed(2) : "–";
 
-const $ = (id) => document.getElementById(id);
-const state = { home: null, away: null };
-
-const pct = (p) => (p * 100).toFixed(1) + "%";
-const esc = (s) => String(s).replace(/[&<>"']/g, (c) =>
-  ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-async function api(path, params) {
-  const u = new URL(path, location.origin);
-  Object.entries(params || {}).forEach(([k, v]) => u.searchParams.set(k, v));
-  const r = await fetch(u);
-  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-  return r.json();
+/* ---- kit colors (ported from the app) ---- */
+const hexRgb = (x) => { if (!x || x.length < 7) return null;
+  const v = [1,3,5].map(i => parseInt(x.slice(i, i+2), 16));
+  return v.some(isNaN) ? null : v; };
+const rgbHex = (v) => "#" + v.map(c => Math.max(0, Math.min(255, Math.round(c))).toString(16).padStart(2, "0")).join("");
+const lum = (v) => (0.299*v[0] + 0.587*v[1] + 0.114*v[2]) / 255;
+const mix = (v, t, to) => v.map((c, i) => c + (to[i] - c) * t);
+function kitColor(hx, onDark) {
+  const v = hexRgb(hx); if (!v) return null;
+  const L = lum(v);
+  if (onDark && L < 0.42) return rgbHex(mix(v, 0.5 - L, [255,255,255]));
+  if (!onDark && L > 0.68) return rgbHex(mix(v, L - 0.45, [30,40,34]));
+  return rgbHex(v);
 }
-
-async function apiPost(path, body) {
-  const r = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
-  return r.json();
+const cdist = (a, b) => { const x = hexRgb(a), y = hexRgb(b);
+  return x && y ? Math.hypot(x[0]-y[0], x[1]-y[1], x[2]-y[2]) : 999; };
+function matchColors(home, away, onDark) {
+  const fbH = onDark ? "#5CE690" : "#17A54B", fbA = onDark ? "#8FC1FF" : "#2D7FF0";
+  const kh = kitColor(home?.colors?.[0], onDark) || fbH;
+  let ka = kitColor(away?.colors?.[0], onDark);
+  if (!ka || cdist(kh, ka) < 95) ka = kitColor(away?.colors?.[1], onDark);
+  if (!ka || cdist(kh, ka) < 95) ka = cdist(kh, fbA) < 95 ? "#D97E06" : fbA;
+  return [kh, ka];
 }
+const rateColor = (v, good, ok) => v >= good ? "#0FA152" : v >= ok ? "#E8890C" : "#7C917E";
+const initialsOf = (n) => n.split(" ").map(w => w[0]).filter(Boolean).slice(0, 2).join("");
+const lastName = (n) => n.split(" ").slice(-1)[0];
 
-/* ---------------- meta strip ---------------- */
-api("/api/meta").then((m) => {
-  $("metaStrip").innerHTML =
-    `<b>${m.matches.toLocaleString()}</b> matches · <b>${m.teams.toLocaleString()}</b> teams · ` +
-    `<b>${m.leagues}</b> competitions · ${m.data_from} → ${m.data_to}` +
-    (m.refresh ? ` · auto-updates ${m.refresh.auto}${m.refresh.refreshing ? " (refreshing now…)" : ""}` : "");
-  $("footerModel").textContent =
-    `Model: time-weighted attack/defence strengths + Elo ratings (ClubElo-anchored) blended into a ` +
-    `Dixon-Coles-corrected Poisson score matrix. Backtest ${m.backtest.period}: ` +
-    `${m.backtest.test_matches.toLocaleString()} matches, model Brier ${m.backtest.model_brier} vs ` +
-    `bookmaker ${m.backtest.bookmaker_brier}. ${m.backtest.note}`;
-  const ab = $("aboutAccuracy");
-  if (ab) {
-    const le = m.live_eval;
-    const live = le ? `<b>Re-measured automatically at every data refresh</b>: latest check ` +
-      `(${le.matches.toLocaleString()} matches, ${le.from} to ${le.to}): correct result ` +
-      `<b>${(le.model_accuracy * 100).toFixed(1)}%</b> vs the bookmakers' ` +
-      `<b>${(le.book_accuracy * 100).toFixed(1)}%</b>. ` : "";
-    ab.innerHTML = live +
-      `Full-model benchmark (${esc(m.backtest.period)}, ${m.backtest.test_matches.toLocaleString()} matches): ` +
-      `<b>${(m.backtest.model_accuracy * 100).toFixed(1)}%</b> vs ` +
-      `<b>${(m.backtest.bookmaker_accuracy * 100).toFixed(1)}%</b>, with calibrated probabilities: ` +
-      `when it says 40%, that outcome happens about 40% of the time. That is the realistic ceiling ` +
-      `of football prediction, for anyone.`;
+/* ---- global state ---- */
+const S = { home: null, away: null, context: "", prediction: null, meta: null };
+
+/* ---- navigation ---- */
+$("#nav").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b) return;
+  $$("#nav button").forEach(x => x.classList.toggle("on", x === b));
+  $$(".page").forEach(p => p.classList.toggle("on", p.id === "page-" + b.dataset.page));
+  if (b.dataset.page === "fantasy" && !S.fplLoaded) loadFPL();
+  if (b.dataset.page === "parlays") loadParlays();
+  if (b.dataset.page === "about") renderAbout();
+});
+
+/* ---- health + meta ---- */
+(async function boot() {
+  const dot = $("#srvdot"), txt = $("#srvtxt");
+  for (;;) {
+    try {
+      const hz = await api("/healthz");
+      if (hz.model_ready) {
+        dot.classList.add("ok"); txt.textContent = "model ready";
+        S.meta = await api("/api/meta").catch(() => null);
+        if (S.meta) {
+          $("#tagline").textContent = `Probabilities for every football match, from ${S.meta.matches.toLocaleString()} games of history, live team news and each side's probable players.`;
+          $("#datastamp").textContent = "results through " + S.meta.data_to;
+        }
+        loadFixtures();
+        return;
+      }
+      txt.textContent = "model warming (~2 min)…";
+    } catch { txt.textContent = "waking the server…"; }
+    await new Promise(r => setTimeout(r, 7000));
   }
-}).catch(() => { $("metaStrip").textContent = "dataset unavailable"; });
+})();
 
-/* ---------------- team picker ---------------- */
-function setupPicker(side) {
-  const input = $(side === "home" ? "inputHome" : "inputAway");
-  const drop = $(side === "home" ? "dropHome" : "dropAway");
-  const badge = $(side === "home" ? "badgeHome" : "badgeAway");
-  const empty = $(side === "home" ? "emptyHome" : "emptyAway");
-  const sub = $(side === "home" ? "subHome" : "subAway");
-  let timer = null;
+/* ---- match types ---- */
+const CONTEXTS = [
+  ["", "Regular", "A normal league or cup fixture. No adjustment is made.", "any"],
+  ["derby", "Derby", "A local rivalry: tighter, more cautious. Expected goals trimmed about 5% (research-based).", "club"],
+  ["friendly", "Friendly", "An exhibition with nothing at stake. Measured on 9,740 friendlies: about 8% fewer goals.", "intl"],
+  ["qualifier", "Qualifier", "A qualifying tie. Across 11,484 of them: about 3% more goals.", "intl"],
+  ["finals", "Tournament", "A finals-tournament match. Across 8,184: about 4% more goals.", "intl"],
+  ["third_place", "3rd place", "Both sides free of pressure: about 21% more goals, from only 70 matches, so a strong hint rather than a hard number.", "intl"],
+];
+const ctxScope = () => (!S.home || !S.away) ? "any"
+  : (S.home.scope === "intl" && S.away.scope === "intl" ? "intl" : "club");
+function renderChips() {
+  const box = $("#ctxchips"); box.innerHTML = "";
+  const sc = ctxScope();
+  for (const [k, label, blurb, scope] of CONTEXTS) {
+    const b = h("button", "chip" + (S.context === k ? " on" : ""), esc(label));
+    const ok = scope === "any" || sc === "any" || scope === sc;
+    b.disabled = !ok;
+    b.onclick = () => { S.context = k; renderChips(); if (S.prediction) predictNow(); };
+    box.appendChild(b);
+  }
+  const cur = CONTEXTS.find(([k]) => k === S.context) || CONTEXTS[0];
+  let extra = "";
+  if (sc === "club") extra = " Tournament stages are greyed out because these are clubs.";
+  if (sc === "intl") extra = " Derby is greyed out because these are national teams.";
+  $("#ctxnote").textContent = cur[2] + extra;
+}
+renderChips();
 
+/* ---- team pickers ---- */
+function wireSlot(id, key) {
+  const slot = $(id), input = $("input", slot), dd = $(".dd", slot),
+        badge = $("img.badge", slot), meta = $(".meta", slot);
+  let timer;
   input.addEventListener("input", () => {
-    state[side] = null;
-    updateButton();
+    S[key] = null; slot.classList.remove("filled"); badge.hidden = true;
+    meta.textContent = ""; updateGo(); renderChips();
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 2) { drop.classList.remove("open"); return; }
+    if (q.length < 2) { dd.hidden = true; return; }
     timer = setTimeout(async () => {
-      const teams = await api("/api/teams", { q });
-      drop.innerHTML = teams.map((t, i) =>
-        `<div class="opt" data-i="${i}">
-           <span class="nm">${esc(t.name)}${t.active ? "" : ' <span class="inactive">†</span>'}</span>
-           <span class="lg">${esc(t.league)} · ${Math.round(t.elo)}</span>
-         </div>`).join("") || `<div class="opt"><span class="lg">no teams found</span></div>`;
-      drop.classList.toggle("open", teams.length > 0);
-      drop.querySelectorAll(".opt[data-i]").forEach((el) => {
-        el.addEventListener("mousedown", (e) => {
-          e.preventDefault();
-          pick(side, teams[+el.dataset.i]);
+      try {
+        const opts = await api("/api/teams", { q });
+        dd.innerHTML = "";
+        opts.slice(0, 6).forEach(t => {
+          const b = h("button", "", `<div class="l">${esc(t.name)}</div><div class="s">${esc(t.league)} · elo ${Math.round(t.elo)}</div>`);
+          b.onclick = () => pickTeam(key, t);
+          dd.appendChild(b);
         });
-      });
-    }, 180);
+        dd.hidden = opts.length === 0;
+      } catch { dd.hidden = true; }
+    }, 220);
   });
-  input.addEventListener("blur", () => setTimeout(() => drop.classList.remove("open"), 150));
-
-  async function pick(s, t) {
-    state[s] = t;
-    input.value = t.name;
-    drop.classList.remove("open");
-    sub.innerHTML = `${esc(t.league)}${t.country ? " · " + esc(t.country) : ""} · elo <b>${Math.round(t.elo)}</b>`;
-    updateButton();
-    badge.hidden = true; empty.hidden = false;
-    try {
-      const { badge: url } = await api("/api/logo", { team_id: t.id });
-      if (url && state[s] && state[s].id === t.id) {
-        badge.src = url; badge.hidden = false; empty.hidden = true;
-      }
-    } catch { /* keep placeholder */ }
-  }
+  document.addEventListener("click", (e) => { if (!slot.contains(e.target)) dd.hidden = true; });
 }
-setupPicker("home");
-setupPicker("away");
-
-function updateButton() {
-  $("predictBtn").disabled = !(state.home && state.away && state.home.id !== state.away.id);
+function pickTeam(key, t) {
+  S[key] = t;
+  const slot = $(key === "home" ? "#slot-home" : "#slot-away");
+  $("input", slot).value = t.name;
+  $(".dd", slot).hidden = true;
+  slot.classList.add("filled");
+  $(".meta", slot).textContent = (t.league || "") + (isFinite(t.elo) ? ` · elo ${Math.round(t.elo)}` : "");
+  updateGo(); renderChips();
+  api("/api/logo", { team_id: t.id }).then(info => {
+    Object.assign(t, info);
+    const img = $("img.badge", slot);
+    if (info.badge) { img.src = info.badge; img.hidden = false; }
+  }).catch(() => {});
 }
+const updateGo = () => { $("#go").disabled = !(S.home && S.away); };
+wireSlot("#slot-home", "home"); wireSlot("#slot-away", "away");
+$("#go").onclick = () => predictNow();
 
-/* ---------------- prediction run ---------------- */
-const outPlayers = { home: new Set(), away: new Set() };
-
-$("predictBtn").addEventListener("click", async () => {
-  outPlayers.home.clear();
-  outPlayers.away.clear();
-  runPrediction();
-});
-
-async function runPrediction() {
-  const { home, away } = state;
-  $("results").hidden = true;
-  $("loading").hidden = false;
+/* ---- fixtures rail ---- */
+async function loadFixtures() {
+  const box = $("#fixtures");
   try {
-    const neutral = $("neutralChk").checked;
-    const [pred, h2h] = await Promise.all([
-      api("/api/predict", { home: home.id, away: away.id, neutral,
-                            context: $("ctxSel").value,
-                            out_home: [...outPlayers.home].join("|"),
-                            out_away: [...outPlayers.away].join("|") }),
-      api("/api/h2h", { home: home.id, away: away.id }),
-    ]);
-    render(pred, h2h);
-    $("results").hidden = false;
-    api("/api/buzz", { home: home.id, away: away.id }).then(renderBuzz)
-      .catch(() => renderBuzz({ posts: [], note: "buzz unavailable" }));
-    renderNews("newsHomeTitle", "newsHome", home);
-    renderNews("newsAwayTitle", "newsAway", away);
-  } catch (e) {
-    alert("Prediction failed: " + e.message);
-  } finally {
-    $("loading").hidden = true;
-  }
-}
-
-function render(p, h) {
-  renderParlayChips(p);
-
-  /* verdict */
-  $("verdictCall").textContent = p.verdict.call.toUpperCase();
-  $("verdictConf").textContent =
-    `${pct(p.verdict.confidence)} probability · elo diff ${p.model_detail.elo_diff > 0 ? "+" : ""}${p.model_detail.elo_diff}` +
-    (p.model_detail.uses_xg ? " · xG-powered" : "");
-  $("bigScore").textContent = p.verdict.predicted_score.replace("-", " – ");
-  $("xgLine").textContent =
-    `expected goals ${p.expected_goals.home} – ${p.expected_goals.away}${p.neutral_venue ? " · neutral venue" : ""}`;
-
-  /* probability bar */
-  const m = p.markets.one_x_two;
-  $("segH").style.width = m.home * 100 + "%"; $("segH").textContent = m.home > 0.12 ? pct(m.home) : "";
-  $("segD").style.width = m.draw * 100 + "%"; $("segD").textContent = m.draw > 0.12 ? pct(m.draw) : "";
-  $("segA").style.width = m.away * 100 + "%"; $("segA").textContent = m.away > 0.12 ? pct(m.away) : "";
-  $("plH").textContent = `${p.home.name} ${pct(m.home)}`;
-  $("plD").textContent = `draw ${pct(m.draw)}`;
-  $("plA").textContent = `${p.away.name} ${pct(m.away)}`;
-  const fo = m.fair_odds;
-  $("fairOdds").innerHTML =
-    `fair odds: ${esc(p.home.name)} <b>${fo.home ?? "n/a"}</b> · draw <b>${fo.draw ?? "n/a"}</b> · ${esc(p.away.name)} <b>${fo.away ?? "n/a"}</b>` +
-    ` &nbsp;<small>(bookmaker odds above these = model sees value; below = avoid)</small>`;
-
-  /* caveats */
-  $("caveats").innerHTML = (p.caveats || []).map((c) => `<div class="caveat">⚠ ${esc(c)}</div>`).join("");
-
-  /* heatmap 0-6 with header row/col */
-  const mat = p.score_matrix;
-  let maxP = 0;
-  mat.forEach((row) => row.forEach((v) => { maxP = Math.max(maxP, v); }));
-  let cells = `<div class="hcell hdr"></div>`;
-  for (let j = 0; j < 7; j++) cells += `<div class="hcell hdr">${j}</div>`;
-  for (let i = 0; i < 7; i++) {
-    cells += `<div class="hcell hdr">${i}</div>`;
-    for (let j = 0; j < 7; j++) {
-      const v = mat[i][j];
-      const t = Math.pow(v / maxP, 0.7);
-      const bg = `rgba(234, 179, 8, ${(t * 0.85).toFixed(3)})`;
-      const col = t > 0.55 ? "#241A00" : "var(--chalk)";
-      cells += `<div class="hcell" style="background:${bg};color:${col}" title="P(${i}-${j}) = ${pct(v)}">
-                  <span class="sc">${i}-${j}</span><span class="pv">${(v * 100).toFixed(1)}</span>
-                </div>`;
-    }
-  }
-  $("heatmap").innerHTML = cells;
-  $("topScores").innerHTML = p.markets.correct_scores.map((s) =>
-    `<span class="chip"><b>${s.score}</b> ${pct(s.prob)} <span class="odds">@${s.fair_odds ?? "n/a"}</span></span>`).join("");
-
-  /* markets */
-  const mk = p.markets;
-  const hi = (a, b) => a >= b ? ["hi", ""] : ["", "hi"];
-  const rows = [];
-  rows.push(marketBox("Totals (over/under)", Object.entries(mk.totals).map(([line, t]) => {
-    const [ho, hu] = hi(t.over, t.under);
-    return `<div class="mk-row"><span>O/U ${line}</span>
-      <span><span class="v ${ho}">${pct(t.over)}</span> <small>@${t.fair_over ?? "n/a"}</small> /
-      <span class="v ${hu}">${pct(t.under)}</span> <small>@${t.fair_under ?? "n/a"}</small></span></div>`;
-  }).join("")));
-  const [by, bn] = hi(mk.btts.yes, mk.btts.no);
-  rows.push(marketBox("Both teams to score", `
-    <div class="mk-row"><span>Yes</span><span class="v ${by}">${pct(mk.btts.yes)} <small>@${mk.btts.fair_yes ?? "n/a"}</small></span></div>
-    <div class="mk-row"><span>No</span><span class="v ${bn}">${pct(mk.btts.no)} <small>@${mk.btts.fair_no ?? "n/a"}</small></span></div>`));
-  rows.push(marketBox("Double chance", `
-    <div class="mk-row"><span>1X (home or draw)</span><span class="v">${pct(mk.double_chance["1X"])}</span></div>
-    <div class="mk-row"><span>X2 (away or draw)</span><span class="v">${pct(mk.double_chance["X2"])}</span></div>
-    <div class="mk-row"><span>12 (no draw)</span><span class="v">${pct(mk.double_chance["12"])}</span></div>`));
-  rows.push(marketBox("Draw no bet", `
-    <div class="mk-row"><span>${esc(p.home.name)}</span><span class="v">${pct(mk.draw_no_bet.home)}</span></div>
-    <div class="mk-row"><span>${esc(p.away.name)}</span><span class="v">${pct(mk.draw_no_bet.away)}</span></div>`));
-  rows.push(marketBox("Clean sheet", `
-    <div class="mk-row"><span>${esc(p.home.name)}</span><span class="v">${pct(mk.clean_sheet.home)}</span></div>
-    <div class="mk-row"><span>${esc(p.away.name)}</span><span class="v">${pct(mk.clean_sheet.away)}</span></div>`));
-  rows.push(marketBox("Handicap (home)", Object.entries(mk.handicaps).map(([k, v]) =>
-    `<div class="mk-row"><span>${k}</span><span class="v">${pct(v)}</span></div>`).join("")));
-  $("marketGrid").innerHTML = rows.join("");
-
-  /* scorers */
-  const sc = p.likely_scorers || {};
-  const names = Object.keys(sc).filter((k) => sc[k].length);
-  $("scorersRow").hidden = names.length === 0;
-  if (names.length) {
-    const [n1, n2] = [p.home.name, p.away.name];
-    fillScorers("scorersHomeTitle", "scorersHome", n1, sc[n1] || [], "home");
-    fillScorers("scorersAwayTitle", "scorersAway", n2, sc[n2] || [], "away");
-  }
-
-  /* h2h */
-  const s = h.summary;
-  $("h2hSummary").innerHTML = s.played ? `
-    <div class="h2h-stat"><div class="num home">${s.wins_home}</div><div class="lbl">${esc(p.home.name)} wins</div></div>
-    <div class="h2h-stat"><div class="num">${s.draws}</div><div class="lbl">draws</div></div>
-    <div class="h2h-stat"><div class="num away">${s.wins_away}</div><div class="lbl">${esc(p.away.name)} wins</div></div>
-    <div class="h2h-extra">${s.played} meetings since ${s.first_meeting} · goals ${s.goals_home}–${s.goals_away} · ${s.avg_goals_per_match} goals/match</div>`
-    : `<div class="h2h-extra">These teams have never met in our dataset.</div>`;
-  $("meetings").innerHTML = h.meetings.map((mt) => `
-    <tr><td class="d">${mt.date}</td><td>${esc(mt.home)}</td>
-    <td class="s">${mt.score}</td><td>${esc(mt.away)}</td><td class="c">${esc(mt.competition)}</td></tr>`).join("");
-
-  /* form */
-  fillForm("formHome", p.home.name, h.form.home);
-  fillForm("formAway", p.away.name, h.form.away);
-
-  /* elo chart */
-  drawElo(h.elo_history, p.home.name, p.away.name);
-}
-
-function marketBox(name, inner) {
-  return `<div class="market"><div class="mk-name">${name}</div>${inner}</div>`;
-}
-
-function fillScorers(titleId, bodyId, team, list, side) {
-  $(titleId).textContent = `LIKELY SCORERS · ${team}`;
-  const outSet = outPlayers[side];
-  const outChips = [...outSet].map((p) =>
-    `<button class="out-chip" data-side="${side}" data-player="${esc(p)}" title="click to mark available again">
-       ${esc(p)} OUT ✕</button>`).join("");
-  $(bodyId).innerHTML = (outChips ? `<div class="out-row">${outChips}</div>` : "") +
-    (list.length ? list.map((x) => `
-    <div class="scorer-row">
-      <span class="scorer-name">${esc(x.player)}</span>
-      <span class="scorer-goals">${x.recent_xg !== undefined
-        ? `${x.apps} apps · ${x.recent_goals} g · ${x.xg_per_match} xG/match` : `${x.recent_goals} goals / 2yr`}</span>
-      <span class="scorer-bar"><i style="width:${Math.min(x.prob_to_score * 160, 100)}%"></i></span>
-      <span class="scorer-p">${pct(x.prob_to_score)}</span>
-      <button class="out-btn" data-side="${side}" data-player="${esc(x.player)}"
-        title="mark unavailable (injury/suspension) and re-run prediction">OUT?</button>
-    </div>`).join("")
-    : `<div class="buzz-note">no recent scorer data${outSet.size ? " (marked-out players hidden)" : ""}</div>`);
-  $(bodyId).querySelectorAll(".out-btn, .out-chip").forEach((btn) =>
-    btn.addEventListener("click", () => {
-      const s = btn.dataset.side, pl = btn.dataset.player;
-      if (outPlayers[s].has(pl)) outPlayers[s].delete(pl); else outPlayers[s].add(pl);
-      runPrediction();
-    }));
-}
-
-function fillForm(id, team, form) {
-  $(id).innerHTML = `<div class="form-team">${esc(team)}</div><div class="form-chips">` +
-    form.map((f) =>
-      `<span class="fchip ${f.result}" title="${f.date} ${f.venue === "H" ? "vs" : "@"} ${esc(f.opponent)} ${f.score}">${f.result}</span>`
-    ).join("") + `</div>`;
-}
-
-function drawElo(hist, nameH, nameA) {
-  const cv = $("eloChart");
-  const ctx = cv.getContext("2d");
-  const W = cv.width, H = cv.height;
-  ctx.clearRect(0, 0, W, H);
-  const all = [...hist.home, ...hist.away];
-  if (!all.length) return;
-  const vals = all.map((d) => d[1]);
-  const lo = Math.min(...vals) - 25, hiV = Math.max(...vals) + 25;
-  const css = getComputedStyle(document.documentElement);
-
-  const drawLine = (series, color) => {
-    if (series.length < 2) return;
-    ctx.beginPath();
-    series.forEach((pt, i) => {
-      const x = (i / (series.length - 1)) * (W - 70) + 10;
-      const y = H - 24 - ((pt[1] - lo) / (hiV - lo)) * (H - 40);
-      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    const d = await api("/api/fixtures/upcoming", { days: 8, limit: 26 });
+    box.innerHTML = "";
+    $("#fxnote").textContent = d.fixtures.length + " matches found";
+    if (!d.fixtures.length) { box.append(h("div", "mini", "No confirmed fixtures in the feed right now — between rounds this list can be empty.")); return; }
+    d.fixtures.forEach(f => {
+      const ko = new Date(f.kickoff);
+      const when = ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+        + " · " + f.kickoff.slice(11, 16) + " UK";
+      const card = h("div", "fx",
+        `<div class="lg">${esc(f.league)}</div>
+         <div class="teams">${esc(f.home)} <span style="color:var(--muted)">v</span> ${esc(f.away)}</div>
+         <div class="when">${esc(when)}</div>` +
+        (f.odds ? `<div class="odds">books: H ${odds(f.odds.home)} · D ${odds(f.odds.draw)} · A ${odds(f.odds.away)}</div>` : ""));
+      card.onclick = () => {
+        pickTeam("home", { id: f.home_id, name: f.home, elo: f.home_elo, scope: "club", league: f.league });
+        pickTeam("away", { id: f.away_id, name: f.away, elo: f.away_elo, scope: "club", league: f.league });
+        predictNow();
+        window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      box.appendChild(card);
     });
-    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
-    const last = series[series.length - 1];
-    const y = H - 24 - ((last[1] - lo) / (hiV - lo)) * (H - 40);
-    ctx.fillStyle = color;
-    ctx.font = "11px IBM Plex Mono";
-    ctx.fillText(String(Math.round(last[1])), W - 56, y + 4);
-  };
-  ctx.strokeStyle = css.getPropertyValue("--line"); ctx.lineWidth = 1;
-  [0.25, 0.5, 0.75].forEach((f) => {
-    ctx.beginPath(); ctx.moveTo(10, H * f); ctx.lineTo(W - 60, H * f); ctx.stroke();
-  });
-  drawLine(hist.home, "#c6ff4a");
-  drawLine(hist.away, "#6ecbff");
-  ctx.fillStyle = "#8fa393"; ctx.font = "10px IBM Plex Mono";
-  ctx.fillText(nameH + " ▬", 10, 12);
-  ctx.fillStyle = "#6ecbff";
-  ctx.fillText(nameA + " ▬", 10, 26);
-  ctx.fillStyle = "#c6ff4a";
-  ctx.fillRect(10, 5, 0, 0);
-}
-
-/* ---------------- odds checker: vig, cross-book arbitrage, EV vs model ------- */
-/* ---------------- cross-book arb scanner ---------------- */
-let scanTimer = null;
-$("scanKey").value = localStorage.getItem("oddsApiKey") || "";
-
-function renderScanEvent(e) {
-  const legs = e.legs.map((l) =>
-    `<span class="se-leg">${esc(l.outcome)} <b>@${l.odds}</b> ${esc(l.book)}${l.at_hardrock ? ' <span class="hr">← Hard Rock</span>' : ""}
-      · $${l.stake_per_100}</span>`).join("");
-  const when = e.commence ? new Date(e.commence).toLocaleString() : "";
-  return `<div class="scan-event ${e.arb ? "arb" : ""}">
-    <div class="se-head"><span>${esc(e.match)}</span>
-      <span class="se-cov ${e.arb ? "good" : ""}">${e.arb
-        ? `ARB +${e.profit_pct}% guaranteed`
-        : `coverage ${e.coverage_pct}%`} · ${e.books_count} books${e.hardrock_listed ? " · HR listed" : ""}</span></div>
-    <div class="se-legs">${legs}</div>
-    <div class="buzz-meta">${esc(e.sport)} · ${when}${e.arb ? " · stakes shown per $100 total. Verify prices before betting, lines move fast" : ""}</div>
-  </div>`;
-}
-
-async function runScan() {
-  const key = $("scanKey").value.trim();   // optional: server has a stored key
-  const status = $("scanStatus");
-  const out = $("scanOut");
-  if (key) localStorage.setItem("oddsApiKey", key);
-  status.textContent = "scanning…";
-  try {
-    const r = await api("/api/scan", { key });
-    if (r.error) {
-      status.textContent = r.error === "invalid_key"
-        ? "key rejected. Check it at the-odds-api.com"
-        : "monthly quota used up. It resets next month";
-      return;
-    }
-    status.textContent = `${r.scanned} fixtures (today + tomorrow) · ${r.arbs.length} arbs · ` +
-      `${r.credits_spent ?? "?"} credits used, ${r.remaining_credits ?? "?"} left · ${new Date().toLocaleTimeString()}`;
-    let html = "";
-    if (r.arbs.length) {
-      html += r.arbs.map(renderScanEvent).join("");
-      document.title = `(${r.arbs.length} ARB) Plus100`;
-    } else {
-      document.title = "Plus100: Football Prediction App";
-      html += `<div class="odds-verdict">No guaranteed-profit combination across books right now, which is the normal state.
-        Closest near-misses below; a lock appears when one of these dips under 100%.</div>`;
-    }
-    if (r.near_misses.length) html += r.near_misses.map(renderScanEvent).join("");
-    if (!r.scanned) html = `<div class="odds-verdict">No fixtures currently listed in the scanned competitions.</div>`;
-    out.innerHTML = html;
-  } catch (e) {
-    status.textContent = "scan failed: " + e.message;
-  }
-}
-
-$("scanBtn").addEventListener("click", runScan);
-$("scanAuto").addEventListener("change", (ev) => {
-  clearInterval(scanTimer);
-  if (ev.target.checked) {
-    runScan();
-    scanTimer = setInterval(runScan, 5 * 60 * 1000);
-  }
-});
-
-/* ---------------- app shell: view tabs + sport switching ---------------- */
-document.querySelectorAll(".nav-btn").forEach((btn) =>
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".nav-btn").forEach((b) => b.classList.toggle("active", b === btn));
-    document.querySelectorAll(".view").forEach((v) =>
-      v.classList.toggle("active", v.id === "view-" + btn.dataset.view));
-    window.scrollTo({ top: 0 });
-  }));
-
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
-}
-
-/* ---------------- parlay lab (same-game, exact joint odds) ---------------- */
-const parlayLegs = new Set();
-
-function parlayGroups(p) {
-  const H = p.home.name.toUpperCase();
-  const A = p.away.name.toUpperCase();
-  const csChips = p.markets.correct_scores.slice(0, 6)
-    .map((s) => [`cs:${s.score}`, s.score]);
-  const scorerChips = [];
-  const sotChips = [];
-  for (const [side, team] of [["home", p.home.name], ["away", p.away.name]]) {
-    for (const x of (p.likely_scorers[team] || []).slice(0, 4)) {
-      scorerChips.push([`scorer:${side}:${x.player}`, `${x.player.toUpperCase()} SCORES`]);
-      if (x.sot_rate > 0) {
-        sotChips.push([`sot:${side}:${x.player}:1`, `${x.player.toUpperCase()} 1+ SOT`]);
-        sotChips.push([`sot:${side}:${x.player}:2`, `${x.player.toUpperCase()} 2+ SOT`]);
-      }
-    }
-  }
-  const groups = [
-    ["Result", [["home", `${H} WIN`], ["draw", "DRAW"], ["away", `${A} WIN`],
-                ["1x", `${H}/DRAW`], ["12", "NO DRAW"], ["x2", `${A}/DRAW`],
-                ["margin:home:2", `${H} BY 2+`], ["margin:away:2", `${A} BY 2+`]]],
-    ["Correct score", csChips],
-    ["Total goals", [["o:1.5", "OVER 1.5"], ["o:2.5", "OVER 2.5"], ["o:3.5", "OVER 3.5"],
-                     ["u:2.5", "UNDER 2.5"], ["u:3.5", "UNDER 3.5"],
-                     ["odd", "ODD"], ["even", "EVEN"]]],
-    ["Both teams", [["btts", "BTTS YES"], ["no_btts", "BTTS NO"]]],
-    ["Team goals", [["home_o:0.5", `${H} 1+`], ["home_o:1.5", `${H} 2+`],
-                    ["away_o:0.5", `${A} 1+`], ["away_o:1.5", `${A} 2+`],
-                    ["home_cs", `${H} CLEAN SHEET`], ["away_cs", `${A} CLEAN SHEET`]]],
-    ["Halves & timing", [["ht:home", `HT ${H}`], ["ht:draw", "HT DRAW"], ["ht:away", `HT ${A}`],
-                         ["first:home", `${H} SCORES FIRST`], ["first:away", `${A} SCORES FIRST`],
-                         ["both_halves_goal", "GOAL EACH HALF"]]],
-    ["Corners", [["corners_o:8.5", "OVER 8.5"], ["corners_o:9.5", "OVER 9.5"],
-                 ["corners_o:10.5", "OVER 10.5"], ["corners_u:9.5", "UNDER 9.5"],
-                 ["corners_u:10.5", "UNDER 10.5"]]],
-    ["Cards", [["cards_o:3.5", "OVER 3.5"], ["cards_o:4.5", "OVER 4.5"],
-               ["cards_u:4.5", "UNDER 4.5"]]],
-  ];
-  if (scorerChips.length) groups.push(["Player to score", scorerChips]);
-  if (sotChips.length) groups.push(["Shots on target", sotChips]);
-  return groups;
-}
-
-function toAmerican(dec) {
-  return dec >= 2 ? `+${Math.round((dec - 1) * 100)}` : `${Math.round(-100 / (dec - 1))}`;
-}
-
-async function renderParlaySuggestions() {
-  const box = $("parlaySuggest");
-  box.innerHTML = `<div class="buzz-note">building suggested parlays…</div>`;
-  try {
-    const list = await api("/api/parlay/suggest", {
-      home: state.home.id, away: state.away.id, neutral: $("neutralChk").checked,
-      context: $("ctxSel").value,
-    });
-    if (!list.length) { box.innerHTML = ""; return; }
-    box.innerHTML = list.map((s, i) => `
-      <button class="sugg-card" data-i="${i}">
-        <span class="sugg-name">${esc(s.name)}${s.n_legs >= 4 ? ' <span class="hr">BOOST ELIGIBLE</span>' : ""}</span>
-        <span class="sugg-legs">${s.labels.map(esc).join(" + ")}</span>
-        <span class="sugg-nums">
-          <b>${(s.joint_prob * 100).toFixed(1)}%</b> to hit ·
-          fair <b>${s.fair_odds}</b> (${toAmerican(s.fair_odds)}) ·
-          take if quoted ≥ <b class="good">${s.min_quote}</b> (${toAmerican(s.min_quote)})
-          ${s.correlation_boost > 1.15 ? ` · <span class="hr">×${s.correlation_boost} correlated</span>` : ""}
-        </span>
-      </button>`).join("");
-    box.querySelectorAll(".sugg-card").forEach((card) =>
-      card.addEventListener("click", () => {
-        const s = list[+card.dataset.i];
-        parlayLegs.clear();
-        s.legs.forEach((l) => parlayLegs.add(l));
-        document.querySelectorAll("#parlayChips .leg-chip").forEach((c) =>
-          c.classList.toggle("on", parlayLegs.has(c.dataset.leg)));
-        updateParlay();
-      }));
-  } catch (e) {
-    box.innerHTML = `<div class="buzz-note">suggestions unavailable: ${esc(e.message)}</div>`;
-  }
-}
-
-function renderParlayChips(p) {
-  const wrap = $("parlayChips");
-  parlayLegs.clear();
-  $("parlayOut").innerHTML = "";
-  renderParlaySuggestions();
-  wrap.innerHTML = parlayGroups(p).map(([title, legs]) => legs.length ? `
-    <div class="leg-group"><span class="leg-group-title">${title}</span>
-      ${legs.map(([k, label]) => `<button class="leg-chip" data-leg="${esc(k)}">${esc(label)}</button>`).join("")}
-    </div>` : "").join("");
-  wrap.querySelectorAll(".leg-chip").forEach((c) => c.addEventListener("click", () => {
-    const k = c.dataset.leg;
-    if (parlayLegs.has(k)) { parlayLegs.delete(k); c.classList.remove("on"); }
-    else { parlayLegs.add(k); c.classList.add("on"); }
-    updateParlay();
-  }));
-}
-
-let parlayTimer = null;
-async function updateParlay() {
-  const out = $("parlayOut");
-  if (!state.home || !state.away || parlayLegs.size === 0) {
-    out.innerHTML = "";
-    return;
-  }
-  const body = {
-    home: state.home.id, away: state.away.id,
-    neutral: $("neutralChk").checked, legs: [...parlayLegs],
-    context: $("ctxSel").value,
-  };
-  try {
-    const r = await apiPost("/api/parlay", body);
-    const legRows = r.legs.map((l) =>
-      `<tr><td>${esc(l.label)}</td><td>${(l.marginal_prob * 100).toFixed(1)}%</td></tr>`).join("");
-    const corr = r.correlation_boost;
-    const corrTxt = corr === null ? "" :
-      corr > 1.03 ? `<span class="good">Legs are positively correlated (×${corr} vs independent), and books often underpay these.</span>` :
-      corr < 0.97 ? `<span class="warn">Legs fight each other (×${corr} vs independent). A book quoting multiplied odds would be overpaying you, and they rarely do.</span>` :
-      `Legs are roughly independent (×${corr}).`;
-    const gradeHtml = `<div class="odds-verdict">Bet this combo only if your app quotes MORE than the fair odds above.</div>`;
-    out.innerHTML = `<div class="odds-result"><div class="odds-verdict">
-      <table class="ev-table"><tr><th>leg</th><th>probability alone</th></tr>${legRows}</table>
-      Joint probability <b>${(r.joint_prob * 100).toFixed(1)}%</b> → fair odds <b>${r.fair_odds ?? "n/a"}</b>
-      <small>(naive independent: ${r.naive_odds ?? "n/a"})</small><br>${corrTxt}
-      ${(r.notes || []).map((x) => `<br><small>${esc(x)}</small>`).join("")}</div>${gradeHtml}</div>`;
-  } catch (e) {
-    out.innerHTML = `<div class="odds-verdict loss">${esc(e.message)}</div>`;
-  }
-}
-
-
-/* signature Edge Meter: model-vs-market deviation, clamped to ±15% */
-function edgeMeter(edgePct) {
-  const span = 15;
-  const clamped = Math.max(-span, Math.min(span, edgePct));
-  const posPct = 50 + (clamped / span) * 50;
-  const color = edgePct > 1 ? "var(--lime)" : edgePct < -1 ? "var(--red)" : "var(--muted)";
-  return `<div class="edge-meter" title="How far the offered price deviates from the combined probability estimate">
-    <div class="edge-meter-val" style="color:${color}">${edgePct > 0 ? "+" : ""}${edgePct.toFixed(1)}%</div>
-    <div class="edge-meter-track"><div class="edge-meter-zero"></div>
-      <div class="edge-meter-dot" style="left:${posPct}%;background:${color}"></div></div>
-    <div class="edge-meter-label"><span>-${span}</span><span>EDGE</span><span>+${span}</span></div>
-  </div>`;
-}
-
-/* ---------------- best bets ---------------- */
-$("bestBetsBtn").addEventListener("click", async () => {
-  const key = $("scanKey").value.trim();   // optional: server has a stored key
-  const status = $("bbStatus");
-  const out = $("bestBetsOut");
-  status.textContent = "fetching odds and grading every price…";
-  try {
-    const params = { key };
-    if (state.home && state.away) {
-      params.home = state.home.id;
-      params.away = state.away.id;
-    }
-    const r = await api("/api/bestbets", params);
-    if (r.error) {
-      status.textContent = r.error === "invalid_key" ? "key rejected" : "monthly quota exhausted";
-      return;
-    }
-    status.textContent = `${r.fixtures} fixtures · ${r.all_evaluated} prices graded · credits left: ${r.remaining_credits ?? "?"}`;
-
-    const betRows = (bets) => bets.map((b) => `<tr>
-      <td>${esc(b.match)}</td><td>${esc(b.outcome)}</td>
-      <td>${b.odds}${b.at_hardrock ? ' <span class="hr">HR</span>' : ""} <small>${esc(b.book)}</small></td>
-      <td>${(b.p_blend * 100).toFixed(1)}% <small>(mkt ${(b.p_market * 100).toFixed(0)} / mdl ${(b.p_model * 100).toFixed(0)})</small></td>
-      <td>${edgeMeter(b.edge_pct)}</td>
-      <td>${b.edge_pct > 1 ? b.quarter_kelly_pct + "%" : "n/a"}</td></tr>`).join("");
-    const table = (bets) =>
-      `<table class="ev-table"><tr><th>match</th><th>bet</th><th>best price</th><th>probability</th><th>edge</th><th>¼-Kelly</th></tr>${betRows(bets)}</table>`;
-
-    let html = `<div class="odds-result">`;
-
-    if (params.home && r.selected) {
-      const good = r.selected.bets.filter((b) => b.edge_pct > 1);
-      html += `<div class="odds-verdict ${good.length ? "arb" : ""}"><b>YOUR MATCH: ${esc(r.selected.match)}</b><br>
-        ${good.length
-          ? `<span class="good">${good.length} bet${good.length > 1 ? "s" : ""} worth taking:</span>`
-          : `<span class="warn">No positive-edge bet on this match. Every price is fair or short. The honest play is to skip it.</span>`}
-        ${table(r.selected.bets)}</div>`;
-    } else if (params.home && !r.selected) {
-      html += `<div class="odds-verdict"><span class="warn">Your selected match isn't priced by any book in the
-        next 2 days.</span> Books only list fixtures close to kickoff (no API credits were spent).
-        Clear the team pickers and re-run to sweep all listed fixtures instead.</div>`;
-    }
-
-    if (r.bets.length) {
-      const inner = `<div class="odds-verdict">${table(r.bets)}
-        <span class="warn">Edges are long-run statistical advantages. Expect to lose these bets routinely.
-        Stake the ¼-Kelly % of bankroll or less, never chase.</span></div>`;
-      html += params.home
-        ? `<details class="bb-details"><summary>Other opportunities across all fixtures (${r.bets.length})</summary>${inner}</details>`
-        : inner;
-    } else if (!params.home) {
-      html += `<div class="odds-verdict">No bet clears the 1% edge bar right now. The market and model agree
-        everywhere. That's the normal state; the honest play is to bet nothing today.</div>`;
-    }
-    if (r.parlays && r.parlays.length) {
-      const rows = r.parlays.map((p) => `<tr>
-        <td>${p.legs.map((l) => `${esc(l.outcome)} @${l.odds} <small>(${esc(l.match)}, ${esc(l.book)})</small>`).join("<br>")}</td>
-        <td>${p.combined_odds}<br><small>fair ${p.fair_odds}</small></td>
-        <td>${(p.win_prob * 100).toFixed(1)}%</td>
-        <td class="pos">+${p.edge_pct}%</td>
-        <td>${p.quarter_kelly_pct}%<br><small>busts ${p.bust_prob_pct}%</small></td></tr>`).join("");
-      html += `<div class="odds-verdict"><b>Cross-match parlays from these edges</b>
-        <table class="ev-table"><tr><th>legs</th><th>combined</th><th>win prob</th><th>edge</th><th>¼-Kelly</th></tr>${rows}</table>
-        <span class="warn">Combined odds use each leg's best price across books. A real slip sits at ONE book and
-        pays less. Only take a parlay if the book's quoted total beats the fair odds shown. Singles remain the
-        better risk-to-reward; parlays multiply variance faster than edge.</span></div>`;
-    }
-    out.innerHTML = html + "</div>";
-  } catch (e) {
-    status.textContent = "failed: " + e.message;
-  }
-});
-
-async function renderNews(titleId, bodyId, team) {
-  $(titleId).textContent = `TEAM NEWS & INJURIES · ${team.name}`;
-  $(bodyId).innerHTML = `<div class="buzz-note">loading…</div>`;
-  try {
-    const n = await api("/api/news", { team_id: team.id });
-    $(bodyId).innerHTML = n.items.length ? n.items.map((it) => `
-      <div class="buzz-post">
-        <a href="${esc(it.link)}" target="_blank" rel="noopener">${esc(it.title)}</a>
-        <div class="buzz-meta">${esc(it.date)}</div>
-      </div>`).join("")
-      : `<div class="buzz-note">no recent headlines found</div>`;
   } catch {
-    $(bodyId).innerHTML = `<div class="buzz-note">news unavailable</div>`;
+    box.innerHTML = "";
+    box.append(h("div", "mini", "Couldn't load the live schedule. It retries next visit."));
   }
 }
 
-function renderBuzz(b) {
-  const el = $("buzz");
-  if (b.posts && b.posts.length) {
-    el.innerHTML = b.posts.map((pst) => `
-      <div class="buzz-post">
-        <a href="${esc(pst.url)}" target="_blank" rel="noopener">${esc(pst.title)}</a>
-        <div class="buzz-meta">r/${esc(pst.subreddit)} · ▲${pst.score} · ${pst.num_comments} comments</div>
-      </div>`).join("");
-  } else {
-    el.innerHTML = `<div class="buzz-note">${esc(b.note || "no recent posts found")}. Reddit blocks unauthenticated API access from some networks; the statistical prediction above is unaffected.</div>`;
+/* ---- prediction flow ---- */
+async function predictNow() {
+  const out = $("#results");
+  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>replaying 154,000 matches of history…</div>`;
+  const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
+  try {
+    const [p, hh, lu] = await Promise.all([
+      api("/api/predict", params),
+      api("/api/h2h", { home: S.home.id, away: S.away.id }).catch(() => null),
+      api("/api/lineup", { home: S.home.id, away: S.away.id, neutral: params.neutral }).catch(() => null),
+    ]);
+    S.prediction = p;
+    renderPrediction(out, p, hh, lu);
+  } catch (e) {
+    out.innerHTML = `<div class="err">${esc(e.message)}. If the server was asleep, give it a minute and try again.</div>`;
   }
+}
+
+function heroHTML(p) {
+  const m = p.markets.one_x_two;
+  const [kh, ka] = matchColors(S.home, S.away, true);
+  const likelier = m.home >= m.away ? S.home : S.away;
+  const art = likelier?.fanart || S.home?.fanart || S.away?.fanart;
+  const lightKit = hexRgb(kh) && hexRgb(ka) && (lum(hexRgb(kh)) > .75 || lum(hexRgb(ka)) > .75);
+  const ctx = p.context_applied;
+  return `<div class="hero">
+    ${art ? `<img class="bgimg" src="${esc(art)}"><div class="shade"></div>` : ""}
+    <div class="inner">
+      ${ctx && ctx.applied ? `<span class="ctxbadge">${esc((CONTEXTS.find(([k]) => k === ctx.context) || ["","match type"])[1])}: goals ${ctx.goals_multiplier >= 1 ? "up" : "down"} ${Math.abs((ctx.goals_multiplier - 1) * 100).toFixed(0)}% — already in these numbers</span>` : ""}
+      <div class="cols">
+        <div>${S.home?.badge ? `<img class="badge" src="${esc(S.home.badge)}">` : ""}
+          <div class="team">${esc(p.home.name)}</div>
+          <div class="pct count" style="color:${kh}">${pct(m.home)}</div>
+          <div class="fair">fair ${odds(m.fair_odds.home)}</div></div>
+        <div><div class="drawlbl">DRAW</div><div class="draw count">${pct(m.draw, 0)}</div>
+          <div class="fair">fair ${odds(m.fair_odds.draw)}</div></div>
+        <div>${S.away?.badge ? `<img class="badge" src="${esc(S.away.badge)}">` : ""}
+          <div class="team">${esc(p.away.name)}</div>
+          <div class="pct count" style="color:${ka}">${pct(m.away)}</div>
+          <div class="fair">fair ${odds(m.fair_odds.away)}</div></div>
+      </div>
+      <div class="stack">
+        <div style="width:${m.home*100}%;background:${kh}"></div>
+        <div style="width:${m.draw*100}%;background:${lightKit ? "rgba(30,42,34,.55)" : "rgba(255,255,255,.35)"}"></div>
+        <div style="width:${m.away*100}%;background:${ka}"></div>
+      </div>
+      ${S.home?.stadium && !$("#neutral").checked ? `<div class="venue">📍 ${esc(S.home.stadium)}${S.home.capacity ? ` · ${Number(S.home.capacity).toLocaleString()} seats` : ""}</div>` : ""}
+      <div class="tiles">
+        <div class="tile"><b>${Number(p.expected_goals.home).toFixed(1)}–${Number(p.expected_goals.away).toFixed(1)}</b><span>expected goals</span></div>
+        <div class="tile"><b style="color:#5CE690">${p.model_detail.elo_diff > 0 ? "+" : ""}${Math.round(p.model_detail.elo_diff)}</b><span>elo difference</span></div>
+        <div class="tile"><b style="color:#FFD27A">${(100 - Math.max(m.home, m.draw, m.away) * 100).toFixed(0)}%</b><span>misses anyway</span></div>
+      </div>
+    </div></div>`;
+}
+
+function goalRiver(p, kh, ka) {
+  const W = 900, H = 150, mid = H / 2, px = 6;
+  const weight = (t) => 0.72 + 0.0072*t + 0.55*Math.exp(-((t-45)**2)/12) + 0.95*Math.exp(-((t-90)**2)/16);
+  const river = (lam, dir) => {
+    const amp = mid - 12, k = Math.min(lam / 2.2, 1);
+    let d = `M ${px} ${mid}`;
+    for (let t = 0; t <= 90; t += 3)
+      d += ` L ${(px + t/90*(W-2*px)).toFixed(1)} ${(mid - dir*(weight(t)/2.62)*amp*k).toFixed(1)}`;
+    return d + ` L ${W-px} ${mid} Z`;
+  };
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%">
+    <path d="${river(p.expected_goals.home, 1)}" fill="${kh}" opacity=".8"/>
+    <path d="${river(p.expected_goals.away, -1)}" fill="${ka}" opacity=".8"/>
+    <line x1="${W/2}" y1="10" x2="${W/2}" y2="${H-10}" stroke="#7C917E" stroke-dasharray="3 4" opacity=".7"/>
+    <line x1="${px}" y1="${mid}" x2="${W-px}" y2="${mid}" stroke="#fff" stroke-width="1.4"/>
+  </svg>
+  <div style="display:flex;justify-content:space-between" class="mini"><span>kick-off</span><span>half-time</span><span>90'+</span></div>`;
+}
+
+function pitchHTML(lu, kh, ka) {
+  if (!lu) return `<div class="mini">No public squad data for this pairing.</div>`;
+  if (lu.home.known < 7 || lu.away.known < 7) {
+    const thin = [lu.home, lu.away].filter(t => t.known < 7).map(t => t.name).join(" or ");
+    return `<div class="mini">No usable squad list for ${esc(thin)} right now, so no line-up is invented for them.</div>`;
+  }
+  const ROW_Y = [0.92, 0.80, 0.685, 0.565];
+  const W = 100, H = 152;   /* percent-based positioning inside an aspect box */
+  let dots = "";
+  const place = (team, side, color) => {
+    team.players.forEach((pl, i) => {
+      const fx = (pl.slot + 1) / (pl.n + 1);
+      const x = (side === "home" ? fx : 1 - fx) * 100;
+      const y = (side === "home" ? ROW_Y[pl.row] : 1 - ROW_Y[pl.row]) * 100;
+      const pill = pl.p_score != null
+        ? `<span class="pill" style="background:${rateColor(pl.p_score, .25, .12)}">${Math.round(pl.p_score * 100)}%</span>` : "";
+      dots += `<div class="pdot" style="left:${x}%;top:${y}%" title="${esc(pl.name)} — ${esc(pl.pos)}${pl.p_score != null ? " · scores " + Math.round(pl.p_score*100) + "% of the time" : ""}">
+        <div class="face" style="border-color:${color}">${pl.img ? `<img src="${esc(pl.img)}" onerror="this.replaceWith('${esc(initialsOf(pl.name))}')">` : esc(initialsOf(pl.name))}</div>
+        ${pill}<div class="nm">${esc(lastName(pl.name))}</div></div>`;
+    });
+  };
+  place(lu.away, "away", ka); place(lu.home, "home", kh);
+  const stripes = [0,2,4,6].map(i => `<rect y="${i*19}" width="152" height="19" fill="#fff" opacity=".045"/>`).join("");
+  const leg = (t, color) => `<div class="item"><span class="sw" style="background:${color}"></span><div><b>${esc(t.name)}</b><br><span>${t.complete ? t.formation : `probable core · ${t.known} of 11 known`}</span></div></div>`;
+  return `<div class="legend">${leg(lu.home, kh)}${leg(lu.away, ka)}</div>
+  <div class="pitchwrap" style="aspect-ratio:100/152">
+    <svg viewBox="0 0 100 152" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">
+      <defs><linearGradient id="turf" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#0F7A3C"/><stop offset=".5" stop-color="#0B5E2F"/><stop offset="1" stop-color="#0F7A3C"/>
+      </linearGradient></defs>
+      <rect width="100" height="152" fill="url(#turf)"/>${stripes}
+      <g stroke="#fff" stroke-opacity=".35" stroke-width=".7" fill="none">
+        <rect x="2" y="2" width="96" height="148" rx="1"/>
+        <line x1="2" y1="76" x2="98" y2="76"/><circle cx="50" cy="76" r="12"/>
+        <rect x="20" y="2" width="60" height="17"/><rect x="20" y="133" width="60" height="17"/>
+        <rect x="36" y="2" width="28" height="6.4"/><rect x="36" y="145.6" width="28" height="6.4"/>
+      </g>
+    </svg>${dots}
+  </div>
+  ${(lu.home.outs || []).length || (lu.away.outs || []).length
+    ? `<div class="caveat">⚠ Likely missing per team news: ${esc([...(lu.home.outs||[]).map(n=>`${n} (${lu.home.name})`), ...(lu.away.outs||[]).map(n=>`${n} (${lu.away.name})`)].join(", "))}. The prediction already accounts for them.</div>` : ""}
+  <div class="mini">${esc(lu.note)} Hover any player for his role and scoring chance.</div>`;
+}
+
+function renderPrediction(out, p, hh, lu) {
+  const m = p.markets.one_x_two;
+  const [kh, ka] = matchColors(S.home, S.away, true);
+  const [khl, kal] = matchColors(S.home, S.away, false);
+  const mkRows = [
+    ["Over 2.5 goals", p.markets.totals["2.5"].over], ["Under 2.5 goals", p.markets.totals["2.5"].under],
+    ["Both teams score", p.markets.btts.yes], [`${p.home.name} or draw`, p.markets.double_chance["1X"]],
+    [`${p.home.name} clean sheet`, p.markets.clean_sheet.home], [`${p.away.name} clean sheet`, p.markets.clean_sheet.away],
+  ];
+  const N = 6; let maxP = 0;
+  p.score_matrix.slice(0, N).forEach(r => r.slice(0, N).forEach(v => maxP = Math.max(maxP, v)));
+  const heat = p.score_matrix.slice(0, N).map((row, i) =>
+    `<tr><td class="mini">${i}</td>` + row.slice(0, N).map(v => {
+      const t = Math.pow(v / maxP, 0.7);
+      return `<td><div class="cell" style="background:rgba(23,165,75,${(t*.82).toFixed(2)});color:${t > .55 ? "#fff" : "var(--dim)"}">${(v*100).toFixed(1)}</div></td>`;
+    }).join("") + "</tr>").join("");
+  const scorers = Object.entries(p.likely_scorers || {}).map(([team, list]) => list.length ? `
+    <div><h3 class="sec">Chance to score · ${esc(team)}</h3>
+    ${list.slice(0, 5).map(x => `<div class="pair"><span class="tag" style="width:auto">${esc(x.player)}</span>
+      <div class="hbar"><div style="width:${x.prob_to_score*100}%;background:${rateColor(x.prob_to_score,.25,.12)}"></div></div>
+      <span class="val" style="color:${rateColor(x.prob_to_score,.25,.12)}">${Math.round(x.prob_to_score*100)}%</span></div>`).join("")}</div>` : "").join("");
+
+  out.innerHTML = heroHTML(p) + `
+    <div class="duo">
+      <div class="card"><h3 class="sec">When the goals should come <span class="note">stoppage-time spikes are real</span></h3>${goalRiver(p, khl, kal)}
+        <div class="mini">Each side's scoring threat minute by minute, in their real colors. The wider the river, the likelier they strike.</div></div>
+      <div class="card"><h3 class="sec">Exact score probabilities <span class="note">most likely ≈ 1 in 9</span></h3>
+        <table class="heat"><tr><td></td>${[...Array(N)].map((_, j) => `<td class="mini">${j}</td>`).join("")}</tr>${heat}</table>
+        <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals</div>
+        <div class="scores">${p.markets.correct_scores.slice(0, 4).map(cs => `<div class="sc"><b>${esc(cs.score)}</b><span>${pct(cs.prob)}</span></div>`).join("")}</div></div>
+    </div>
+    <div class="card"><h3 class="sec">Probable line-ups</h3><div id="pitchbox">${pitchHTML(lu, kh, ka)}</div></div>
+    <div class="duo">
+      <div class="card"><h3 class="sec">Every market, our fair price</h3>
+        ${mkRows.map(([label, prob]) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
+          <div class="hbar"><div style="width:${prob*100}%;background:var(--blue)"></div></div>
+          <span class="val">${pct(prob, 0)} <span style="color:var(--blue)">${odds(1/prob)}</span></span></div>`).join("")}
+        <div class="mini">bet any of these only when a book offers MORE than the fair price</div></div>
+      <div class="card">${scorers || `<div class="mini">No player scoring data for these teams.</div>`}</div>
+    </div>
+    ${hh && hh.summary.played ? `<div class="card"><h3 class="sec">Head to head <span class="note">${hh.summary.played} meetings since ${esc(hh.summary.first_meeting || "")}</span></h3>
+      <div class="scores"><div class="sc"><b style="color:${khl}">${hh.summary.wins_home}</b><span>${esc(hh.teams.home.name)} wins</span></div>
+        <div class="sc"><b>${hh.summary.draws}</b><span>draws</span></div>
+        <div class="sc"><b style="color:${kal}">${hh.summary.wins_away}</b><span>${esc(hh.teams.away.name)} wins</span></div></div>
+      <table><tr><th>Date</th><th>Match</th><th class="num">Score</th></tr>
+      ${hh.meetings.slice(0, 6).map(mt => `<tr><td class="mini">${esc(mt.date.slice(0, 7))}</td><td>${esc(mt.home)} v ${esc(mt.away)}</td><td class="num"><b>${esc(mt.score)}</b></td></tr>`).join("")}</table></div>` : ""}
+    ${(p.caveats || []).map(c => `<div class="caveat">⚠ ${esc(c)}</div>`).join("")}`;
+}
+
+/* ---- vs market ---- */
+$("#sweep").onclick = async () => {
+  const out = $("#marketout");
+  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>shopping 15 sportsbooks for prices…</div>`;
+  try {
+    const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
+    const d = await api("/api/bestbets", params);
+    const rows = d.selected?.bets || d.bets || [];
+    out.innerHTML = "";
+    if (!rows.length) {
+      out.append(h("div", "card", `<h3 class="sec">Nothing to grade right now</h3><div class="sub" style="margin:0">${
+        d.fixtures === 0 ? "The books aren't listing football in the next two days. This happens between rounds; check back on a match week."
+        : `Checked ${d.fixtures} listed games. No price beats the combined estimate right now, which is the normal state. Not betting today costs you nothing.`}</div>`));
+      return;
+    }
+    const grid = h("div", "duo");
+    rows.forEach(b => {
+      const good = b.edge_pct > 1;
+      grid.append(h("div", "card betcard" + (good ? " good" : ""), `
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <b>${esc(b.outcome)}</b>${good ? `<span class="edgechip">▲ +${b.edge_pct}%</span>` : `<span class="noval">no value</span>`}</div>
+        ${b.match ? `<div class="mini" style="margin-top:2px">${esc(b.match)}</div>` : ""}
+        <div class="pair"><span class="tag">books say</span><div class="hbar"><div style="width:${b.p_market*100}%;background:var(--blue)"></div></div><span class="val">${pct(b.p_market, 0)}</span></div>
+        <div class="pair"><span class="tag">we say</span><div class="hbar"><div style="width:${b.p_model*100}%;background:var(--green)"></div></div><span class="val">${pct(b.p_model, 0)}</span></div>
+        <div class="mini">best price ${odds(b.odds)} at ${esc(b.book)}${b.at_hardrock ? " (Hard Rock)" : ""} · implies ${(100 / b.odds).toFixed(0)}%${good ? ` · stake ${b.quarter_kelly_pct}% of bankroll` : ""}</div>`));
+    });
+    out.append(grid);
+    if (d.remaining_credits != null)
+      out.append(h("div", "mini", `odds credits left: ${d.remaining_credits} · edges are long-run advantages, not sure things`));
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+};
+
+/* ---- parlays ---- */
+async function loadParlays() {
+  const out = $("#parlayout");
+  if (!S.home || !S.away) { out.innerHTML = `<div class="card mini">Pick a match on the Predict page first, then come back here.</div>`; return; }
+  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>simulating this match 150,000 times…</div>`;
+  try {
+    const list = await api("/api/parlay/suggest", { home: S.home.id, away: S.away.id,
+      neutral: $("#neutral").checked, context: S.context });
+    const grid = h("div", "duo"); out.innerHTML = ""; out.append(grid);
+    list.forEach(pl => grid.append(h("div", "card", `
+      <div style="color:var(--green-deep);font-weight:800;font-size:12.5px;margin-bottom:6px">${esc(pl.name)}${pl.n_legs >= 4 ? " · Boost eligible" : ""}</div>
+      <b>${esc(pl.labels.join("  +  "))}</b>
+      <div class="hbar" style="margin-top:10px"><div style="width:${pl.joint_prob*100}%;background:var(--green)"></div></div>
+      <div class="scores">
+        <div class="sc"><b style="color:var(--green-deep)">${pct(pl.joint_prob)}</b><span>hits</span></div>
+        <div class="sc"><b>${odds(pl.fair_odds)}</b><span>fair odds</span></div>
+        <div class="sc"><b style="color:var(--amber)">${odds(pl.min_quote)}</b><span>take if ≥</span></div>
+      </div>
+      ${pl.correlation_boost > 1.15 ? `<div class="mini">legs reinforce each other ×${pl.correlation_boost} vs independent; books often underpay these</div>` : ""}`)));
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+/* ---- fantasy ---- */
+const XI_CAPS = { GK: 1, DEF: 5, MID: 5, FWD: 3 }, XI_MIN = { GK: 1, DEF: 3, MID: 2, FWD: 1 };
+const SQUAD_QUOTA = { GK: 2, DEF: 5, MID: 5, FWD: 3 }, BUDGET = 100.0, CLUB_MAX = 3;
+const cost = (l) => l.reduce((t, p) => t + p.price, 0);
+const clubCount = (l, team) => l.filter(p => p.team === team).length;
+function buildSquad(players) {
+  const xi = [], cnt = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
+  for (const pos of ["GK","DEF","MID","FWD"]) for (const p of players) {
+    if (cnt[pos] >= XI_MIN[pos]) break;
+    if (p.pos === pos && clubCount(xi, p.team) < CLUB_MAX) { xi.push(p); cnt[pos]++; }
+  }
+  const inXi = new Set(xi.map(p => p.id));
+  for (const p of players) {
+    if (xi.length >= 11) break;
+    if (p.pos === "GK" || inXi.has(p.id)) continue;
+    if (cnt[p.pos] < XI_CAPS[p.pos] && clubCount(xi, p.team) < CLUB_MAX) { xi.push(p); cnt[p.pos]++; inXi.add(p.id); }
+  }
+  const bench = [];
+  for (const pos of ["GK","DEF","MID","FWD"]) {
+    const have = () => [...xi, ...bench];
+    const need = SQUAD_QUOTA[pos] - have().filter(p => p.pos === pos).length;
+    const opts = players.filter(p => p.pos === pos && !have().some(q => q.id === p.id))
+      .sort((a, b) => a.price - b.price || b.xpts - a.xpts);
+    let added = 0;
+    for (const p of opts) { if (added >= need) break;
+      if (clubCount(have(), p.team) >= CLUB_MAX) continue; bench.push(p); added++; }
+  }
+  const total = () => cost(xi) + cost(bench);
+  let guard = 80;
+  while (total() > BUDGET && guard-- > 0) {
+    const taken = new Set([...xi, ...bench].map(p => p.id));
+    let best = null;
+    for (let i = 0; i < xi.length; i++) { const out = xi[i];
+      for (const p of players) {
+        if (p.pos !== out.pos || p.price >= out.price || taken.has(p.id)) continue;
+        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), p.team) >= CLUB_MAX) continue;
+        const pain = (out.xpts - p.xpts) / (out.price - p.price);
+        if (!best || pain < best.pain) best = { i, p, pain };
+      } }
+    if (!best) break; xi[best.i] = best.p;
+  }
+  const single = () => {
+    const taken = new Set([...xi, ...bench].map(p => p.id)); let best = null;
+    for (let i = 0; i < xi.length; i++) { const out = xi[i];
+      for (const p of players) {
+        if (p.pos !== out.pos || taken.has(p.id) || p.xpts <= out.xpts) continue;
+        if (total() - out.price + p.price > BUDGET) continue;
+        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), p.team) >= CLUB_MAX) continue;
+        const gain = p.xpts - out.xpts; if (!best || gain > best.gain) best = { i, p, gain };
+      } }
+    if (best) { xi[best.i] = best.p; return true; } return false;
+  };
+  const pair = () => {
+    const stars = players.slice(0, 60);
+    const taken = new Set([...xi, ...bench].map(p => p.id)); let best = null;
+    for (let i = 0; i < xi.length; i++) { const out = xi[i];
+      for (const c of stars) {
+        if (c.pos !== out.pos || taken.has(c.id) || c.xpts <= out.xpts) continue;
+        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), c.team) < CLUB_MAX) continue;
+        for (let k = 0; k < xi.length; k++) {
+          if (k === i || xi[k].team !== c.team) continue; const mm = xi[k];
+          for (const r of players) {
+            if (r.pos !== mm.pos || taken.has(r.id) || r.id === c.id) continue;
+            if (clubCount(xi.filter((_, j) => j !== i && j !== k).concat(bench, [c]), r.team) >= CLUB_MAX) continue;
+            if (total() - out.price - mm.price + c.price + r.price > BUDGET) continue;
+            const net = (c.xpts - out.xpts) + (r.xpts - mm.xpts);
+            if (net > 0.01 && (!best || net > best.net)) best = { i, k, c, r, net };
+          } } } }
+    if (best) { xi[best.i] = best.c; xi[best.k] = best.r; return true; } return false;
+  };
+  guard = 30;
+  while (guard-- > 0) { if (!single() && !pair()) break; }
+  return { xi, bench };
+}
+
+async function loadFPL() {
+  const out = $("#fplout");
+  try {
+    const gw = await api("/api/fpl/gw");
+    if (gw.error) { out.innerHTML = `<div class="card mini">${esc(gw.detail || gw.error)}</div>`; return; }
+    S.fplLoaded = true;
+    $("#fpl-title").textContent = "Fantasy · " + gw.name;
+    S.squad = buildSquad(gw.players);
+    S.gw = gw; S.editing = null;
+    renderFPL(out);
+  } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+}
+
+function renderFPL(out) {
+  const { xi, bench } = S.squad, gw = S.gw;
+  const capt = [...xi].sort((a, b) => b.xpts - a.xpts)[0];
+  const score = xi.reduce((t, p) => t + p.xpts, 0) + (capt ? capt.xpts : 0);
+  const tot = cost(xi) + cost(bench);
+  const XI_ROW = { GK: 0.9, DEF: 0.7, MID: 0.47, FWD: 0.22 };
+  const rows = { GK: [], DEF: [], MID: [], FWD: [] };
+  xi.forEach(p => rows[p.pos].push(p));
+  let dots = "";
+  Object.entries(rows).forEach(([pos, list]) => list.forEach((p, i) => {
+    dots += `<div class="pdot" data-id="${p.id}" style="left:${(i+1)/(list.length+1)*100}%;top:${XI_ROW[pos]*100}%">
+      <div class="face" style="border-color:${p.id === capt.id ? "#FFD24A" : (S.editing && S.editing.id === p.id ? "#FFD24A" : "#fff")}">
+        ${p.photo ? `<img src="${esc(p.photo)}" onerror="this.replaceWith('${esc(initialsOf(p.name))}')">` : esc(initialsOf(p.name))}</div>
+      <span class="pill" style="background:${rateColor(p.xpts, 5, 3)}">${p.xpts.toFixed(1)}</span>
+      <div class="nm">${esc(p.name)}</div></div>`;
+  }));
+  const ids = new Set([...xi, ...bench].map(p => p.id));
+  const alts = S.editing ? gw.players.filter(p => p.pos === S.editing.pos && !ids.has(p.id)).slice(0, 9) : [];
+  const altProblem = (p) => {
+    if (clubCount(xi.filter(x => x.id !== S.editing.id).concat(bench), p.team) >= CLUB_MAX) return `already 3 from ${p.team}`;
+    if (tot - S.editing.price + p.price > BUDGET) return "over the £100m budget";
+    return null;
+  };
+  const table = (list, title) => `<h3 class="sec">${title}</h3><table>
+    <tr><th></th><th>Player</th><th>Fixture</th><th class="num">Price</th><th class="num">xPts</th></tr>
+    ${list.map(p => `<tr><td>${p.photo ? `<img class="face-s" src="${esc(p.photo)}" onerror="this.remove()">` : ""}</td>
+      <td><b>${esc(p.name)}</b> <span class="mini">${esc(p.pos)}</span></td>
+      <td class="mini">${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)}</td>
+      <td class="num">£${p.price}m</td>
+      <td class="num"><span class="pill" style="background:${rateColor(p.xpts, 5, 3)}">${p.xpts.toFixed(1)}</span></td></tr>`).join("")}</table>`;
+
+  out.innerHTML = `<div class="grid2">
+    <div class="card">
+      <div class="budget"><div><div class="mini">projected points, captain doubled</div>
+        <b style="font-size:28px" class="count">${score.toFixed(1)} pts</b>
+        <span class="mini">captain: <b style="color:var(--green-deep)">${esc(capt.name)}</b></span></div>
+        <div style="text-align:right"><div class="mini">squad cost, live prices</div>
+        <b class="${tot > BUDGET ? "overc" : "okc"}">£${tot.toFixed(1)}m of £${BUDGET.toFixed(1)}m</b></div></div>
+      <div class="hbar" style="margin-bottom:14px"><div style="width:${Math.min(tot/BUDGET*100, 100)}%;background:${tot > BUDGET ? "var(--red)" : "var(--pitch)"}"></div></div>
+      <div class="pitchwrap" style="aspect-ratio:100/118">
+        <svg viewBox="0 0 100 118" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">
+          <defs><linearGradient id="turf2" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0" stop-color="#0F7A3C"/><stop offset=".5" stop-color="#0B5E2F"/><stop offset="1" stop-color="#0F7A3C"/></linearGradient></defs>
+          <rect width="100" height="118" fill="url(#turf2)"/>
+          ${[0,2,4,6].map(i => `<rect y="${i*14.75}" width="100" height="14.75" fill="#fff" opacity=".045"/>`).join("")}
+          <g stroke="#fff" stroke-opacity=".35" stroke-width=".7" fill="none">
+            <rect x="2" y="2" width="96" height="114" rx="1"/><line x1="2" y1="59" x2="98" y2="59"/>
+            <circle cx="50" cy="59" r="11"/><rect x="20" y="2" width="60" height="14"/><rect x="20" y="102" width="60" height="14"/></g>
+        </svg>${dots}
+      </div>
+      <div class="bench"><span class="mini" style="margin-top:0">bench</span>
+        ${bench.map(p => `<div class="bp">${p.photo ? `<img src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price}m</div></div>`).join("")}</div>
+      <div class="mini">Real FPL rules at live prices: £100m for the full 15, two keepers, max three per club, legal formations. Gold ring is your captain. Click a player to swap him.</div>
+      ${S.editing ? `<div style="margin-top:14px">${table(alts.map(p => ({...p})), `Swap ${esc(S.editing.name)} for`)}</div>` : ""}
+    </div>
+    <div class="card" style="max-height:900px;overflow:auto">${table(gw.players.slice(0, 40), "Top projected players")}</div>
+  </div>`;
+
+  $$(".pdot[data-id]", out).forEach(d => d.onclick = () => {
+    const p = xi.find(x => String(x.id) === d.dataset.id);
+    S.editing = S.editing && S.editing.id === p.id ? null : p;
+    renderFPL(out);
+  });
+  if (S.editing) {
+    const rowsEls = $$("table tr", out).filter(tr => tr.parentElement.closest(".card") === out.querySelector(".card"));
+    $$(".card:first-child table tr", out).slice(1).forEach((tr, i) => {
+      const p = alts[i]; if (!p) return;
+      const problem = altProblem(p);
+      tr.style.cursor = problem ? "not-allowed" : "pointer";
+      tr.style.opacity = problem ? ".45" : "1";
+      if (problem) tr.title = problem;
+      else tr.onclick = () => {
+        S.squad = { xi: xi.map(x => x.id === S.editing.id ? p : x), bench };
+        S.editing = null; renderFPL(out);
+      };
+    });
+  }
+}
+
+/* ---- about ---- */
+function renderAbout() {
+  const meta = S.meta, live = meta?.live_eval, fe = meta?.fantasy_eval;
+  $("#aboutout").innerHTML = `
+    <p class="sub">Plus100 is a statistics tool. It estimates the probability of football outcomes from historical data and compares them against sportsbook prices. It is not a sportsbook, takes no bets, and has no tie to any operator.</p>
+    ${live ? `<div class="scores" style="margin-bottom:16px">
+      <div class="sc"><b>${(live.matches ?? 0).toLocaleString()}</b><span>matches tested</span></div>
+      <div class="sc"><b style="color:var(--green-deep)">${(live.model_accuracy*100).toFixed(1)}%</b><span>model accuracy</span></div>
+      <div class="sc"><b style="color:var(--blue)">${(live.book_accuracy*100).toFixed(1)}%</b><span>bookmakers</span></div></div>` : ""}
+    <h3 class="sec">Probabilities are not certainty</h3>
+    <p class="sub">A 60% chance fails 4 times in 10. Even the strongest flagged bet loses regularly; edges only appear across many bets. There is no 100% win rate, here or anywhere.</p>
+    <h3 class="sec">Measured, honest accuracy</h3>
+    <p class="sub">Accuracy is re-measured automatically at every data refresh. Random guessing on three outcomes gets 33%; always picking the home side about 44%. Probabilities are calibrated: when we say 40%, it happens about 40% of the time.</p>
+    ${fe ? `<h3 class="sec">How good the fantasy projections are</h3><p class="sub">${esc(fe.note)}</p>` : ""}
+    <h3 class="sec">Where edges really come from</h3>
+    <p class="sub">Against closing prices nothing out-predicts the market, including this model — tested across four separate six-month windows and about 19,600 matches. Edges come from disagreements between books, soft early prices, and boosts. That is what Vs Market hunts.</p>
+    <h3 class="sec">Play it safe</h3>
+    <p class="sub">Only bet money you can afford to lose. If it stops being fun, call 1-800-GAMBLER — free, confidential, always open. Nothing here is financial advice; you alone decide whether and how much to bet.</p>`;
 }
