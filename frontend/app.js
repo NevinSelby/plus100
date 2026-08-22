@@ -128,6 +128,7 @@ function wireSlot(id, key) {
   });
   document.addEventListener("click", (e) => { if (!slot.contains(e.target)) dd.hidden = true; });
 }
+const logoWaits = {};
 function pickTeam(key, t) {
   S[key] = t;
   const slot = $(key === "home" ? "#slot-home" : "#slot-away");
@@ -136,7 +137,9 @@ function pickTeam(key, t) {
   slot.classList.add("filled");
   $(".meta", slot).textContent = (t.league || "") + (isFinite(t.elo) ? ` · elo ${Math.round(t.elo)}` : "");
   updateGo(); renderChips();
-  api("/api/logo", { team_id: t.id }).then(info => {
+  if (S.home && S.away)   // real home fixture unless it's country vs country
+    $("#neutral").checked = S.home.scope === "intl" && S.away.scope === "intl";
+  logoWaits[key] = api("/api/logo", { team_id: t.id }).then(info => {
     Object.assign(t, info);
     const img = $("img.badge", slot);
     if (info.badge) { img.src = info.badge; img.hidden = false; }
@@ -166,6 +169,7 @@ async function loadFixtures() {
       card.onclick = () => {
         pickTeam("home", { id: f.home_id, name: f.home, elo: f.home_elo, scope: "club", league: f.league });
         pickTeam("away", { id: f.away_id, name: f.away, elo: f.away_elo, scope: "club", league: f.league });
+        $("#neutral").checked = false;   // a listed fixture is a real home game
         predictNow();
         window.scrollTo({ top: 0, behavior: "smooth" });
       };
@@ -183,6 +187,7 @@ async function predictNow() {
   out.innerHTML = `<div class="loading"><div class="ball">⚽</div>replaying 154,000 matches of history…</div>`;
   const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
   try {
+    await Promise.allSettled([logoWaits.home, logoWaits.away]);
     const [p, hh, lu] = await Promise.all([
       api("/api/predict", params),
       api("/api/h2h", { home: S.home.id, away: S.away.id }).catch(() => null),
@@ -253,10 +258,6 @@ function goalRiver(p, kh, ka) {
 
 function pitchHTML(lu, kh, ka) {
   if (!lu) return `<div class="mini">No public squad data for this pairing.</div>`;
-  if (lu.home.known < 7 || lu.away.known < 7) {
-    const thin = [lu.home, lu.away].filter(t => t.known < 7).map(t => t.name).join(" or ");
-    return `<div class="mini">No usable squad list for ${esc(thin)} right now, so no line-up is invented for them.</div>`;
-  }
   const ROW_Y = [0.92, 0.80, 0.685, 0.565];
   const W = 100, H = 152;   /* percent-based positioning inside an aspect box */
   let dots = "";
@@ -265,6 +266,12 @@ function pitchHTML(lu, kh, ka) {
       const fx = (pl.slot + 1) / (pl.n + 1);
       const x = (side === "home" ? fx : 1 - fx) * 100;
       const y = (side === "home" ? ROW_Y[pl.row] : 1 - ROW_Y[pl.row]) * 100;
+      if (pl.placeholder) {
+        dots += `<div class="pdot" style="left:${x}%;top:${y}%;opacity:.55" title="The public feed doesn't name this starter">
+          <div class="face" style="border-color:${color};border-style:dashed">?</div>
+          <div class="nm">unknown</div></div>`;
+        return;
+      }
       const pill = pl.p_score != null
         ? `<span class="pill" style="background:${rateColor(pl.p_score, .25, .12)}">${Math.round(pl.p_score * 100)}%</span>` : "";
       dots += `<div class="pdot" style="left:${x}%;top:${y}%" title="${esc(pl.name)} — ${esc(pl.pos)}${pl.p_score != null ? " · scores " + Math.round(pl.p_score*100) + "% of the time" : ""}">
