@@ -105,16 +105,27 @@ def next_gameweek(store: Store) -> dict:
             "kickoff": f.get("kickoff_time"), **fm,
         })
 
-    # attacking pools per team (top players by minutes define the XI-ish pool)
+    # attacking pools per team (top players by minutes define the XI-ish pool).
+    # Early in a season everyone's rates are one game old, so shares also lean on
+    # a price prior (what the market thinks of the player) that fades out as real
+    # minutes arrive — about five full gameweeks to fully trust the rates.
     els = boot["elements"]
+    gws_played = max(0, (gw or 1) - 1)
+    max_mins = max((e["minutes"] for e in els), default=0)
+    maturity = min(max_mins / (90.0 * 5), 1.0)
     pools: dict[int, dict] = {}
     for team_id in fixture_ctx:
         squad = [e for e in els if e["team"] == team_id]
-        squad.sort(key=lambda e: -e["minutes"])
+        squad.sort(key=lambda e: (-e["minutes"], -e["now_cost"]))
         xi = [e for e in squad[:14] if e["minutes"] > 0] or squad[:11]
         pool_g = sum(_per90(e, "expected_goals") for e in xi) or 1e-9
         pool_a = sum(_per90(e, "expected_assists") for e in xi) or 1e-9
-        pools[team_id] = {"g": pool_g, "a": pool_a}
+        outf = [e for e in xi if e["element_type"] != 1]
+        minp = min((e["now_cost"] for e in outf), default=40)
+        pr = {e["id"]: max(e["now_cost"] - minp, 0) ** 1.3 for e in outf}
+        pools[team_id] = {"g": pool_g, "a": pool_a, "pr": pr,
+                          "prsum": sum(pr.values()) or 1e-9,
+                          "maturity": maturity, "gws": gws_played}
 
     players = []
     for e in els:
@@ -177,13 +188,16 @@ def club_squad(store: Store, registry_id: str) -> list[dict]:
 
 
 def _per90(e: dict, field: str) -> float:
+    """Per-90 rate, shrunk toward zero on thin samples instead of zeroed out —
+    vital in the first weeks of a season when everyone has one game played."""
     mins = e["minutes"]
-    if mins < 400:
+    if mins <= 0:
         return 0.0
     try:
-        return float(e.get(field) or 0) / mins * 90
+        v = float(e.get(field) or 0) / mins * 90
     except (TypeError, ValueError):
         return 0.0
+    return v * min(mins / 400.0, 1.0)
 
 
 def _num(x, d: float = 0.0) -> float:
@@ -210,9 +224,10 @@ def _xpts(e: dict, ctx: dict, pool: dict):
     # chance of featuring: starts matter more than raw minutes (a regular starter
     # who missed a month still starts; a super-sub with many minutes may not)
     starts = e.get("starts") or 0
+    gws = max(pool.get("gws", 1), 1)
     if mins > 0:
-        p_play = min(0.95, max(0.15, 0.55 * min(starts / 30.0, 1.0)
-                               + 0.45 * min(mins / 2700.0, 1.0)))
+        p_play = min(0.95, max(0.15, 0.7 * min(starts / gws, 1.0)
+                               + 0.3 * min(mins / (90.0 * gws), 1.0)))
     else:
         p_play = 0.2
     chance = e.get("chance_of_playing_next_round")
@@ -221,8 +236,10 @@ def _xpts(e: dict, ctx: dict, pool: dict):
     p60 = p_play * 0.85
 
     pos = e["element_type"]
-    share_g = min(_per90(e, "expected_goals") / pool["g"], 0.45)
-    share_a = min(_per90(e, "expected_assists") / pool["a"], 0.45)
+    mat = pool.get("maturity", 1.0)
+    prior = min(pool.get("pr", {}).get(e["id"], 0.0) / pool.get("prsum", 1e-9), 0.45)
+    share_g = mat * min(_per90(e, "expected_goals") / pool["g"], 0.45) + (1 - mat) * prior
+    share_a = mat * min(_per90(e, "expected_assists") / pool["a"], 0.45) + (1 - mat) * prior
     e_goals = ctx["team_xg"] * share_g * p_play
     e_assists = ctx["team_xg"] * 0.72 * share_a * p_play   # ~72% of goals are assisted
 
