@@ -203,8 +203,24 @@ def _news_absences(tid: str, names: list[str]) -> list[str]:
     return outs
 
 
+def _match_tracked(flag_name: str, tracked: list[str]) -> str | None:
+    """Map an FPL web name like "M.Salah" onto a tracked full name."""
+    parts = [w for w in re.split(r"[ .]", str(flag_name)) if len(w) > 2]
+    if not parts:
+        return None
+    last = norm_key(parts[-1])
+    if len(last) < 4:
+        return None
+    for t in tracked:
+        if last in norm_key(t):
+            return t
+    return None
+
+
 def _auto_absences(tid: str) -> list[str]:
-    """News-detected likely absentees among the players our model tracks."""
+    """Likely absentees among the players our model tracks, from two live
+    sources: the official FPL availability flags (PL clubs, updated daily by the
+    league) and team-news headlines (everyone else)."""
     reg = store.registry.get(tid, {})
     if reg.get("scope") == "club":
         names = [r["player"] for r in store.player_rates.get(tid, [])[:12]]
@@ -212,7 +228,17 @@ def _auto_absences(tid: str) -> list[str]:
         sg = store.scorer_goals
         names = list(sg[sg.team == reg.get("name", "")].sort_values(
             "wgoals", ascending=False).scorer.head(10))
-    return _news_absences(tid, names)
+    outs = _news_absences(tid, names)
+    if reg.get("scope") == "club":
+        try:
+            from .fpl import club_unavailable
+            for f in club_unavailable(store, tid):
+                hit = _match_tracked(f["name"], names)
+                if hit and hit not in outs:
+                    outs.append(hit)
+        except Exception:  # noqa: BLE001
+            pass
+    return outs
 
 
 @app.get("/api/predict")
@@ -371,7 +397,7 @@ _lineup_lock = threading.Lock()
 _lineup_cache: dict = (
     json.loads(LINEUP_CACHE_FILE.read_text()) if LINEUP_CACHE_FILE.exists() else {}
 )
-_SQUAD_TTL = 3 * 86400
+_SQUAD_TTL = 86400   # squads refresh daily
 _STAFF_WORDS = ("manager", "coach", "assistant", "director", "physio", "analyst", "scout")
 
 
@@ -582,6 +608,16 @@ def _team_lineup(tid: str, lam: float) -> dict:
     # drop players the news says are out — but never empty a position doing it,
     # or a single injury headline can leave a side with no keeper or no striker
     outs = _news_absences(tid, [p["name"] for p in squad])
+    if reg.get("scope") == "club":
+        try:
+            from .fpl import club_unavailable
+            squad_names = [p["name"] for p in squad]
+            for fl in club_unavailable(store, tid):
+                hit = _match_tracked(fl["name"], squad_names)
+                if hit and hit not in outs:
+                    outs.append(hit)
+        except Exception:  # noqa: BLE001
+            pass
     if outs:
         kept, dropped = [], []
         for p in squad:
