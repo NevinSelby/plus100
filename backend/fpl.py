@@ -187,6 +187,31 @@ def club_squad(store: Store, registry_id: str) -> list[dict]:
     return out
 
 
+def club_unavailable(store: Store, registry_id: str) -> list[dict]:
+    """Players flagged unavailable or doubtful by the OFFICIAL live FPL feed for a
+    Premier League club: injured/suspended/unavailable status, or a stated chance
+    of playing at 50% or less. Updated daily by the league itself."""
+    try:
+        boot = _get(f"{BASE}/bootstrap-static/")
+    except Exception:  # noqa: BLE001
+        return []
+    tmap = _team_map(store, boot["teams"])
+    fpl_id = next((fid for fid, v in tmap.items() if v["registry_id"] == registry_id), None)
+    if fpl_id is None:
+        return []
+    out = []
+    for e in boot["elements"]:
+        if e["team"] != fpl_id:
+            continue
+        chance = e.get("chance_of_playing_next_round")
+        if e["status"] in ("i", "s", "u") or (chance is not None and chance <= 50):
+            why = {"i": "injured", "s": "suspended", "u": "unavailable"}.get(
+                e["status"], f"{chance}% chance of playing")
+            out.append({"name": e["web_name"], "why": why,
+                        "news": (e.get("news") or "")[:80]})
+    return out
+
+
 def _per90(e: dict, field: str) -> float:
     """Per-90 rate, shrunk toward zero on thin samples instead of zeroed out —
     vital in the first weeks of a season when everyone has one game played."""
