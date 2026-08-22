@@ -1,5 +1,11 @@
 /* Plus100 web app. Same brain as the phone app, desktop presentation. */
 "use strict";
+const ICONS = {
+  ball: `<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="#16251A" stroke-width="1.6"><circle cx="12" cy="12" r="10"/><path d="M12 7l4.2 3-1.6 5h-5.2L7.8 10z" fill="#16251A" stroke="none"/><path d="M12 2v5M4.5 7.5l3.3 2.5M19.5 7.5L16.2 10M6.9 20l2.5-5M17.1 20l-2.5-5"/></svg>`,
+  pin: `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" style="vertical-align:-2px"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 1116 0z"/><circle cx="12" cy="10" r="3"/></svg>`,
+  warn: `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" style="flex-shrink:0;margin-top:2px"><path d="M10.3 3.9L1.8 18a2 2 0 001.7 3h17a2 2 0 001.7-3L13.7 3.9a2 2 0 00-3.4 0z"/><path d="M12 9v4M12 17h.01"/></svg>`,
+  up: `<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.4" style="vertical-align:-2px"><path d="M23 6l-9.5 9.5-5-5L1 18"/><path d="M17 6h6v6"/></svg>`,
+};
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
 const api = (p, q) => fetch(p + (q ? "?" + new URLSearchParams(q) : ""))
@@ -184,7 +190,7 @@ async function loadFixtures() {
 /* ---- prediction flow ---- */
 async function predictNow() {
   const out = $("#results");
-  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>replaying 154,000 matches of history…</div>`;
+  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>replaying 154,000 matches of history…</div>`;
   const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
   try {
     await Promise.allSettled([logoWaits.home, logoWaits.away]);
@@ -228,7 +234,7 @@ function heroHTML(p) {
         <div style="width:${m.draw*100}%;background:${lightKit ? "rgba(30,42,34,.55)" : "rgba(255,255,255,.35)"}"></div>
         <div style="width:${m.away*100}%;background:${ka}"></div>
       </div>
-      ${S.home?.stadium && !$("#neutral").checked ? `<div class="venue">📍 ${esc(S.home.stadium)}${S.home.capacity ? ` · ${Number(S.home.capacity).toLocaleString()} seats` : ""}</div>` : ""}
+      ${S.home?.stadium && !$("#neutral").checked ? `<div class="venue">${ICONS.pin} ${esc(S.home.stadium)}${S.home.capacity ? ` · ${Number(S.home.capacity).toLocaleString()} seats` : ""}</div>` : ""}
       <div class="tiles">
         <div class="tile"><b>${Number(p.expected_goals.home).toFixed(1)}–${Number(p.expected_goals.away).toFixed(1)}</b><span>expected goals</span></div>
         <div class="tile"><b style="color:#5CE690">${p.model_detail.elo_diff > 0 ? "+" : ""}${Math.round(p.model_detail.elo_diff)}</b><span>elo difference</span></div>
@@ -298,7 +304,7 @@ function pitchHTML(lu, kh, ka) {
     </svg>${dots}
   </div>
   ${(lu.home.outs || []).length || (lu.away.outs || []).length
-    ? `<div class="caveat">⚠ Likely missing per team news: ${esc([...(lu.home.outs||[]).map(n=>`${n} (${lu.home.name})`), ...(lu.away.outs||[]).map(n=>`${n} (${lu.away.name})`)].join(", "))}. The prediction already accounts for them.</div>` : ""}
+    ? `<div class="caveat">${ICONS.warn} Likely missing per team news: ${esc([...(lu.home.outs||[]).map(n=>`${n} (${lu.home.name})`), ...(lu.away.outs||[]).map(n=>`${n} (${lu.away.name})`)].join(", "))}. The prediction already accounts for them.</div>` : ""}
   <div class="mini">${esc(lu.note)} Hover any player for his role and scoring chance.</div>`;
 }
 
@@ -348,13 +354,13 @@ function renderPrediction(out, p, hh, lu) {
         <div class="sc"><b style="color:${kal}">${hh.summary.wins_away}</b><span>${esc(hh.teams.away.name)} wins</span></div></div>
       <table><tr><th>Date</th><th>Match</th><th class="num">Score</th></tr>
       ${hh.meetings.slice(0, 6).map(mt => `<tr><td class="mini">${esc(mt.date.slice(0, 7))}</td><td>${esc(mt.home)} v ${esc(mt.away)}</td><td class="num"><b>${esc(mt.score)}</b></td></tr>`).join("")}</table></div>` : ""}
-    ${(p.caveats || []).map(c => `<div class="caveat">⚠ ${esc(c)}</div>`).join("")}`;
+    ${(p.caveats || []).map(c => `<div class="caveat">${ICONS.warn} ${esc(c)}</div>`).join("")}`;
 }
 
 /* ---- vs market ---- */
 $("#sweep").onclick = async () => {
   const out = $("#marketout");
-  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>shopping 15 sportsbooks for prices…</div>`;
+  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>shopping 15 sportsbooks for prices…</div>`;
   try {
     const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
     const d = await api("/api/bestbets", params);
@@ -371,7 +377,7 @@ $("#sweep").onclick = async () => {
       const good = b.edge_pct > 1;
       grid.append(h("div", "card betcard" + (good ? " good" : ""), `
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <b>${esc(b.outcome)}</b>${good ? `<span class="edgechip">▲ +${b.edge_pct}%</span>` : `<span class="noval">no value</span>`}</div>
+          <b>${esc(b.outcome)}</b>${good ? `<span class="edgechip">${ICONS.up} +${b.edge_pct}%</span>` : `<span class="noval">no value</span>`}</div>
         ${b.match ? `<div class="mini" style="margin-top:2px">${esc(b.match)}</div>` : ""}
         <div class="pair"><span class="tag">books say</span><div class="hbar"><div style="width:${b.p_market*100}%;background:var(--blue)"></div></div><span class="val">${pct(b.p_market, 0)}</span></div>
         <div class="pair"><span class="tag">we say</span><div class="hbar"><div style="width:${b.p_model*100}%;background:var(--green)"></div></div><span class="val">${pct(b.p_model, 0)}</span></div>
@@ -387,7 +393,7 @@ $("#sweep").onclick = async () => {
 async function loadParlays() {
   const out = $("#parlayout");
   if (!S.home || !S.away) { out.innerHTML = `<div class="card mini">Pick a match on the Predict page first, then come back here.</div>`; return; }
-  out.innerHTML = `<div class="loading"><div class="ball">⚽</div>simulating this match 150,000 times…</div>`;
+  out.innerHTML = `<div class="loading"><div class="ball">${ICONS.ball}</div>simulating this match 150,000 times…</div>`;
   try {
     const list = await api("/api/parlay/suggest", { home: S.home.id, away: S.away.id,
       neutral: $("#neutral").checked, context: S.context });
