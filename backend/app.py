@@ -1,6 +1,8 @@
 """FastAPI app: team search, head-to-head stats, predictions, logos, Reddit buzz."""
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -12,7 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -242,7 +244,7 @@ def _auto_absences(tid: str) -> list[str]:
 
 
 @app.get("/api/predict")
-def predict_endpoint(home: str, away: str, neutral: bool = False,
+def predict_endpoint(request: Request, home: str, away: str, neutral: bool = False,
                      out_home: str = "", out_away: str = "", context: str = "none"):
     _team_or_404(home)
     _team_or_404(away)
@@ -262,6 +264,7 @@ def predict_endpoint(home: str, away: str, neutral: bool = False,
             p.setdefault("caveats", []).append(
                 f"Team news suggests {', '.join(outs)} may be unavailable for {team_name}; "
                 "the goal expectation was reduced for the minutes they usually provide.")
+    _log_prediction(request, p, context, neutral)
     return p
 
 
@@ -875,6 +878,145 @@ def meta():
             "last_error": refresher_state["last_error"],
         },
     }
+
+
+# ---------- usage analytics + admin (no database: a JSON file on disk) ----------
+# The free host wipes its disk on every deploy or restart, so this is honest
+# "since the last restart" analytics, and the dashboard says so.
+
+USAGE_FILE = ROOT / "data" / "usage.json"
+_usage_lock = threading.Lock()
+try:
+    _usage = json.loads(USAGE_FILE.read_text())
+    assert isinstance(_usage.get("daily"), dict)
+except Exception:  # noqa: BLE001
+    _usage = {"since": time.time(), "daily": {}, "recent": []}
+_usage_dirty = 0
+
+ADMIN_USER = "nevinselby"
+
+
+def _admin_pass() -> str:
+    # never in the (public) repo: comes from the PLUS100_ADMIN_PASS env var
+    return os.environ.get("PLUS100_ADMIN_PASS", "")
+
+
+def _admin_token() -> str | None:
+    ap = _admin_pass()
+    if not ap:
+        return None
+    return hmac.new(ap.encode(), b"plus100-admin-session", hashlib.sha256).hexdigest()
+
+
+def _visitor_id(request: Request) -> str:
+    ip = (request.headers.get("x-forwarded-for")
+          or (request.client.host if request.client else "?")).split(",")[0].strip()
+    ua = request.headers.get("user-agent", "")[:80]
+    return hashlib.sha256(f"{ip}|{ua}".encode()).hexdigest()[:12]
+
+
+def _day_bucket(day: str) -> dict:
+    return _usage["daily"].setdefault(day, {"requests": 0, "visitors": {}, "predictions": 0})
+
+
+def _flush_usage() -> None:
+    try:
+        USAGE_FILE.write_text(json.dumps(_usage))
+    except OSError:
+        pass
+
+
+@app.middleware("http")
+async def _track_usage(request: Request, call_next):
+    response = await call_next(request)
+    try:
+        path = request.url.path
+        if not (path.startswith("/static") or path.startswith("/api/admin")
+                or path in ("/healthz", "/favicon.ico")):
+            global _usage_dirty
+            vid = _visitor_id(request)
+            with _usage_lock:
+                d = _day_bucket(time.strftime("%Y-%m-%d"))
+                d["requests"] += 1
+                d["visitors"][vid] = d["visitors"].get(vid, 0) + 1
+                _usage_dirty += 1
+                if _usage_dirty >= 25:
+                    _usage_dirty = 0
+                    _flush_usage()
+    except Exception:  # noqa: BLE001 — analytics must never break the site
+        pass
+    return response
+
+
+def _log_prediction(request: Request, p: dict, context: str, neutral: bool) -> None:
+    try:
+        with _usage_lock:
+            _day_bucket(time.strftime("%Y-%m-%d"))["predictions"] += 1
+            _usage["recent"] = ([{
+                "ts": int(time.time()), "home": p["home"]["name"], "away": p["away"]["name"],
+                "context": context if context not in ("", "none") else "regular",
+                "neutral": bool(neutral), "visitor": _visitor_id(request),
+            }] + _usage["recent"])[:500]
+            _flush_usage()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+class AdminLogin(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/api/admin/login")
+def admin_login(body: AdminLogin):
+    ap = _admin_pass()
+    if not ap:
+        raise HTTPException(503, "Admin is not configured on this server "
+                                 "(PLUS100_ADMIN_PASS is unset).")
+    if body.username != ADMIN_USER or not hmac.compare_digest(body.password, ap):
+        raise HTTPException(401, "Wrong username or password.")
+    return {"token": _admin_token()}
+
+
+def _require_admin(request: Request) -> None:
+    exp = _admin_token()
+    tok = request.headers.get("x-admin-token", "")
+    if not exp or not hmac.compare_digest(tok, exp):
+        raise HTTPException(401, "admin login required")
+
+
+@app.get("/api/admin/stats")
+def admin_stats(request: Request):
+    _require_admin(request)
+    with _usage_lock:
+        daily = [{"date": k, "requests": v["requests"], "visitors": len(v["visitors"]),
+                  "predictions": v.get("predictions", 0)}
+                 for k, v in sorted(_usage["daily"].items())]
+        allv: set = set()
+        for v in _usage["daily"].values():
+            allv.update(v["visitors"].keys())
+        matchups: dict[str, int] = {}
+        for r in _usage["recent"]:
+            key = f"{r['home']} v {r['away']}"
+            matchups[key] = matchups.get(key, 0) + 1
+        return {
+            "since": _usage["since"],
+            "unique_visitors": len(allv),
+            "total_requests": sum(d["requests"] for d in daily),
+            "total_predictions": sum(d["predictions"] for d in daily),
+            "daily": daily[-30:],
+            "top_matchups": [{"matchup": k, "n": n} for k, n in
+                             sorted(matchups.items(), key=lambda x: -x[1])[:10]],
+            "recent": _usage["recent"][:100],
+            "note": ("Counted on the server itself, no third-party trackers. The free "
+                     "host wipes its disk on every deploy or restart, so history "
+                     "starts over at that point."),
+        }
+
+
+@app.get("/admin")
+def admin_page():
+    return FileResponse(str(ROOT / "frontend" / "admin.html"))
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "frontend"), name="static")
