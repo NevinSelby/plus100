@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Plus100 · Admin</title>
+<link rel="stylesheet" href="/static/style.css?v=36">
+<style>
+  body { background: var(--bg); }
+  .wrap { max-width: 1020px; margin: 0 auto; padding: 40px 24px; }
+  .loginbox { max-width: 380px; margin: 12vh auto 0; }
+  .loginbox input { width: 100%; margin-top: 10px; padding: 12px 14px; border-radius: 12px;
+    border: 1.5px solid var(--line); font-size: 15px; background: #fff; }
+  .loginbox input:focus { outline: none; border-color: var(--green); }
+  .loginbox .btn { width: 100%; margin-top: 14px; justify-content: center; }
+  .err { color: #D33; font-size: 13.5px; margin-top: 10px; min-height: 18px; }
+  .headrow { display: flex; align-items: center; justify-content: space-between; margin-bottom: 20px; }
+  .tiles4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 16px;
+    padding: 18px; }
+  .stat b { font-size: 30px; letter-spacing: -.5px; display: block; }
+  .stat span { color: var(--muted); font-size: 12.5px; }
+  .twocol { display: grid; grid-template-columns: 1.4fr 1fr; gap: 16px; margin-top: 16px; }
+  @media (max-width: 800px) { .twocol { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; font-size: 12px;
+    padding: 8px 10px; border-bottom: 1px solid var(--line); }
+  td { padding: 9px 10px; border-bottom: 1px solid var(--panel2); color: var(--dim); }
+  td.m { color: var(--ink); font-weight: 600; }
+  .bars { display: flex; align-items: flex-end; gap: 6px; height: 130px; margin-top: 14px; }
+  .bcol { flex: 1; display: flex; flex-direction: column; justify-content: flex-end;
+    align-items: center; gap: 3px; height: 100%; }
+  .b1 { width: 100%; background: var(--green); border-radius: 4px 4px 0 0; min-height: 2px; }
+  .b2 { width: 100%; background: #8FBFF7; border-radius: 4px 4px 0 0; min-height: 2px; }
+  .bdate { font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+  .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
+  .mini { color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap" id="root"></div>
+<script>
+const $ = (s, r) => (r || document).querySelector(s);
+const TOKEN_KEY = "plus100.admin.token";
+const root = $("#root");
+
+function loginView(msg) {
+  root.innerHTML = `
+    <div class="card loginbox">
+      <h3 class="sec">Admin sign-in</h3>
+      <input id="u" placeholder="username" autocomplete="username">
+      <input id="p" type="password" placeholder="password" autocomplete="current-password">
+      <button class="btn" id="go">Sign in</button>
+      <div class="err">${msg || ""}</div>
+      <div class="mini">Analytics are collected on this server only, with no third-party trackers.</div>
+    </div>`;
+  const go = async () => {
+    try {
+      const r = await fetch("/api/admin/login", { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: $("#u").value.trim(), password: $("#p").value }) });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.detail || "login failed");
+      localStorage.setItem(TOKEN_KEY, d.token);
+      dash();
+    } catch (e) { loginView(e.message); }
+  };
+  $("#go").onclick = go;
+  $("#p").onkeydown = (e) => { if (e.key === "Enter") go(); };
+}
+
+async function dash() {
+  const tok = localStorage.getItem(TOKEN_KEY);
+  if (!tok) return loginView();
+  let d;
+  try {
+    const r = await fetch("/api/admin/stats", { headers: { "X-Admin-Token": tok } });
+    if (r.status === 401) { localStorage.removeItem(TOKEN_KEY); return loginView("session expired, sign in again"); }
+    d = await r.json();
+  } catch (e) { return loginView("server unreachable: " + e.message); }
+
+  const since = new Date(d.since * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  const maxReq = Math.max(1, ...d.daily.map(x => x.requests));
+  const bars = d.daily.map(x => `
+    <div class="bcol" title="${x.date}: ${x.visitors} visitors, ${x.predictions} predictions, ${x.requests} requests">
+      <div class="b1" style="height:${Math.max(2, x.predictions / maxReq * 100)}%"></div>
+      <div class="b2" style="height:${Math.max(2, x.requests / maxReq * 100)}%"></div>
+      <div class="bdate">${x.date.slice(5)}</div>
+    </div>`).join("");
+  const fmtT = (ts) => new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  root.innerHTML = `
+    <div class="headrow">
+      <h1 style="font-size:24px;letter-spacing:-.5px">Plus100 admin</h1>
+      <button class="btn" id="out" style="background:var(--panel);color:var(--dim);border:1px solid var(--line)">Sign out</button>
+    </div>
+    <div class="tiles4">
+      <div class="stat"><b>${d.unique_visitors}</b><span>unique visitors</span></div>
+      <div class="stat"><b>${d.total_predictions}</b><span>predictions run</span></div>
+      <div class="stat"><b>${d.total_requests}</b><span>requests served</span></div>
+      <div class="stat"><b style="font-size:16px;margin-top:7px">${since}</b><span>tracking since</span></div>
+    </div>
+    <div class="card" style="margin-top:16px">
+      <h3 class="sec">Daily activity</h3>
+      <div class="bars">${bars || '<div class="mini">nothing yet</div>'}</div>
+      <div class="legend"><span><span class="sw" style="background:var(--green)"></span>predictions</span>
+        <span><span class="sw" style="background:#8FBFF7"></span>all requests</span></div>
+    </div>
+    <div class="twocol">
+      <div class="card">
+        <h3 class="sec">Latest predictions</h3>
+        <table><tr><th>when</th><th>matchup</th><th>type</th><th>venue</th><th>visitor</th></tr>
+        ${d.recent.map(r => `<tr><td>${fmtT(r.ts)}</td><td class="m">${r.home} v ${r.away}</td>
+          <td>${r.context}</td><td>${r.neutral ? "neutral" : "home"}</td>
+          <td style="font-family:monospace;font-size:11px">${r.visitor}</td></tr>`).join("")
+          || "<tr><td colspan=5 class='mini'>none yet</td></tr>"}</table>
+      </div>
+      <div class="card">
+        <h3 class="sec">Most predicted matchups</h3>
+        <table><tr><th>matchup</th><th>times</th></tr>
+        ${d.top_matchups.map(t => `<tr><td class="m">${t.matchup}</td><td>${t.n}</td></tr>`).join("")
+          || "<tr><td colspan=2 class='mini'>none yet</td></tr>"}</table>
+      </div>
+    </div>
+    <p class="mini" style="margin-top:14px">${d.note}</p>`;
+  $("#out").onclick = () => { localStorage.removeItem(TOKEN_KEY); loginView(); };
+  clearTimeout(window.__t); window.__t = setTimeout(dash, 60000);
+}
+dash();
+</script>
+</body>
+</html>
