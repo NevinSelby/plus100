@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import re
 import threading
@@ -182,16 +183,16 @@ def h2h(home: str, away: str):
 
 _ABSENCE_WORDS = ("injur", "ruled out", "out for", "sidelined", "doubt", "suspended",
                   "banned", "surgery", "hamstring", "acl", "fracture", "misses", "miss ")
+_DEPARTURE_WORDS = ("joins ", "signs for", "sold to", "completes move", "transfer agreed",
+                    "departs ", "leaves the club", "left the club", "loan move to")
 
 
-def _news_absences(tid: str, names: list[str]) -> list[str]:
-    """Players from `names` who appear in recent team-news headlines next to an
-    absence word (injury, suspension, ruled out …). Best-effort, cached with news."""
+def _news_scan(tid: str, names: list[str], words: tuple) -> list[str]:
     try:
         items = news(tid)["items"]
     except Exception:  # noqa: BLE001
         return []
-    outs = []
+    hits = []
     for n in names:
         parts = [w for w in str(n).split() if len(w) > 3]
         if not parts:
@@ -199,9 +200,19 @@ def _news_absences(tid: str, names: list[str]) -> list[str]:
         last = norm_key(parts[-1])
         for it in items:
             title = (it.get("title") or "").lower()
-            if last in norm_key(title) and any(w in title for w in _ABSENCE_WORDS):
-                outs.append(n)
+            if last in norm_key(title) and any(w in title for w in words):
+                hits.append(n)
                 break
+    return hits
+
+
+def _news_absences(tid: str, names: list[str]) -> list[str]:
+    """Players from `names` the news says are injured/suspended OR have left the
+    club — either way they should not appear in a line-up or count toward goals."""
+    outs = _news_scan(tid, names, _ABSENCE_WORDS)
+    for n in _news_scan(tid, names, _DEPARTURE_WORDS):
+        if n not in outs:
+            outs.append(n)
     return outs
 
 
@@ -243,6 +254,33 @@ def _auto_absences(tid: str) -> list[str]:
     return outs
 
 
+def _effective_elo(tid: str, outs: list[str]) -> dict:
+    """Today's usable strength: the learned rating, discounted for absent players
+    via the fitted elo→goals curve (so the discount speaks the model's language)."""
+    t = store.registry[tid]
+    base = float(t["elo_global"])
+    from .model import _absence_factor
+    factor, applied = _absence_factor(store, tid, outs)
+    fit = store.goal_fit_club if t["scope"] == "club" else store.goal_fit_intl
+    b = (abs(fit["b"]) + abs(fit["e"])) / 2 or 1.0
+    delta = 400.0 * math.log(max(factor, 0.6)) / b
+    return {"elo": round(base), "elo_effective": round(base + delta),
+            "elo_delta": round(delta),
+            "outs_priced_in": [a["player"] for a in applied]}
+
+
+@app.get("/api/teamstate")
+def teamstate(team_id: str):
+    """Live team condition for the pickers: dynamic rating + who is missing."""
+    _team_or_404(team_id)
+    outs = _auto_absences(team_id)
+    eff = _effective_elo(team_id, outs)
+    return {"id": team_id, **eff, "outs": outs,
+            "ratings_updated": refresher_state.get("last_refresh"),
+            "note": ("The rating re-learns from every result at each data refresh; "
+                     "the effective number additionally discounts today's absentees.")}
+
+
 @app.get("/api/predict")
 def predict_endpoint(request: Request, home: str, away: str, neutral: bool = False,
                      out_home: str = "", out_away: str = "", context: str = "none"):
@@ -264,6 +302,14 @@ def predict_endpoint(request: Request, home: str, away: str, neutral: bool = Fal
             p.setdefault("caveats", []).append(
                 f"Team news suggests {', '.join(outs)} may be unavailable for {team_name}; "
                 "the goal expectation was reduced for the minutes they usually provide.")
+    try:
+        p["home"] |= _effective_elo(home, (oh or auto_oh))
+        p["away"] |= _effective_elo(away, (oa or auto_oa))
+        p["elo_note"] = ("Ratings are re-learned from every new result at each data "
+                         f"refresh (last: {refresher_state.get('last_refresh') or 'startup'}); "
+                         "the effective numbers additionally discount players missing today.")
+    except Exception:  # noqa: BLE001
+        pass
     _log_prediction(request, p, context, neutral)
     return p
 
@@ -514,7 +560,9 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
                     "img": p.get("strCutout") or p.get("strThumb") or None}
             if team_ok and gated is None:
                 gated = info
-            if exact and exact_only is None:
+            # exact names may fall back only when nothing contradicts the club:
+            # for club teams, a KNOWN different current club disqualifies the hit
+            if exact and exact_only is None and (intl or team_ok or not p.get("strTeam")):
                 exact_only = info
     except Exception:  # noqa: BLE001
         return None
@@ -705,11 +753,18 @@ def lineup(home: str, away: str, neutral: bool = False):
     }
 
 
+_PLAYER_TEAM_TTL = 5 * 86400   # transfers happen: re-verify a club every few days
+
+
 def _player_current_team(player: str) -> str | None:
-    """Player's current club per TheSportsDB (cached on disk). None = unknown."""
+    """Player's current club per TheSportsDB, cached on disk WITH an expiry so a
+    transfer is picked up within days (an eternal cache kept ghosts in line-ups)."""
     key = norm_key(player)
-    if key in _player_team_cache:
-        return _player_team_cache[key]
+    hit = _player_team_cache.get(key)
+    if isinstance(hit, str) or hit is None and key in _player_team_cache:
+        hit = {"team": hit if isinstance(hit, str) else None, "ts": 0}   # legacy entry
+    if isinstance(hit, dict) and time.time() - hit.get("ts", 0) < _PLAYER_TEAM_TTL:
+        return hit.get("team")
     team = None
     try:
         r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchplayers.php",
@@ -721,11 +776,15 @@ def _player_current_team(player: str) -> str | None:
             if soccer:
                 team = soccer[0].get("strTeam")
         else:
-            return None  # rate limited: unknown, don't cache
+            # rate limited: keep whatever we knew, do not overwrite with unknown
+            return hit.get("team") if isinstance(hit, dict) else None
     except Exception:  # noqa: BLE001
-        return None
-    _player_team_cache[key] = team
-    PLAYER_TEAM_CACHE_FILE.write_text(json.dumps(_player_team_cache))
+        return hit.get("team") if isinstance(hit, dict) else None
+    _player_team_cache[key] = {"team": team, "ts": time.time()}
+    try:
+        PLAYER_TEAM_CACHE_FILE.write_text(json.dumps(_player_team_cache))
+    except OSError:
+        pass
     return team
 
 
