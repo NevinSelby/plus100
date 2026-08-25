@@ -1280,9 +1280,53 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                 })
             if out:
                 note = ("The odds feed is between rounds, so this is the confirmed "
-                        "Premier League schedule. Kick-off times are UK time.")
+                        "schedule instead. Kick-off times are UK time.")
         except Exception:  # noqa: BLE001
             pass
+        # other big leagues: the free schedule source lists the next confirmed
+        # match per league — thin, but keeps the rail worldwide between rounds
+        _TSDB_LEAGUES = [("4335", "La Liga", "Spain"), ("4332", "Serie A", "Italy"),
+                         ("4331", "Bundesliga", "Germany"), ("4334", "Ligue 1", "France"),
+                         ("4337", "Eredivisie", "Netherlands"),
+                         ("4344", "Primeira Liga", "Portugal"),
+                         ("4329", "Championship", "England")]
+
+        def _map_club(name: str):
+            from .bestbets import resolve_team
+            tid = resolve_team(store, name, "club")
+            if not tid:
+                for pref in ("AC ", "AS ", "FC ", "SS ", "SSC ", "CF ", "RC "):
+                    if name.startswith(pref):
+                        tid = resolve_team(store, name[len(pref):], "club")
+                        if tid:
+                            break
+            return tid
+
+        for lgid, lgname, country in _TSDB_LEAGUES:
+            try:
+                r2 = requests.get("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php",
+                                  params={"id": lgid}, headers=UA, timeout=8)
+                for ev in (r2.json() or {}).get("events") or []:
+                    ts = ev.get("strTimestamp")
+                    if not ts:
+                        continue
+                    kod = datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M")
+                    if kod < now - timedelta(hours=3) or kod > now + timedelta(days=max(days, 12)):
+                        continue
+                    hid = _map_club(ev.get("strHomeTeam") or "")
+                    aid = _map_club(ev.get("strAwayTeam") or "")
+                    if not hid or not aid:
+                        continue
+                    out.append({
+                        "home_id": hid, "away_id": aid,
+                        "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
+                        "home_elo": store.registry[hid]["elo_global"],
+                        "away_elo": store.registry[aid]["elo_global"],
+                        "league": lgname, "country": country,
+                        "kickoff": kod.strftime("%Y-%m-%dT%H:%M"), "odds": None, "rank": 2,
+                    })
+            except Exception:  # noqa: BLE001
+                continue
     out.sort(key=lambda f: (f["rank"], f["kickoff"]))
     payload = {"fixtures": out[:limit], "count": len(out), "note": note}
     _fixtures_cache[key] = (time.time(), payload)
