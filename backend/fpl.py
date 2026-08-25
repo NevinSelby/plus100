@@ -560,7 +560,7 @@ def model_squad(store: Store) -> dict:
             xi_ids.append(next(p["id"] for p in squad if p["name"] == n))
         cap = next(p["id"] for p in squad if p["name"] == SEED_CAPTAIN)
         vice = next(p["id"] for p in squad if p["name"] == SEED_VICE)
-        st = {"created_gw": gw, "gw": gw, "banked": 1,
+        st = {"created_gw": gw, "gw": gw, "evaluated_gw": gw - 1, "banked": 1,
               "bank": round(100.0 - sum(p["buy"] for p in squad), 1),
               "squad": squad, "xi": xi_ids, "captain": cap, "vice": vice,
               "transfers": [], "scores": []}
@@ -572,7 +572,7 @@ def model_squad(store: Store) -> dict:
                     st["scores"].append({"gw": g, "points": pts})
         state_put("model_squad", st)
 
-    # ---- a new gameweek arrived: score the old one, then evolve within the rules
+    # ---- a new gameweek arrived: score the old one and bank the earned transfer
     if st["gw"] < gw:
         for g in range(st["gw"], gw):
             if g in finished and not any(s["gw"] == g for s in st["scores"]):
@@ -581,6 +581,11 @@ def model_squad(store: Store) -> dict:
                     st["scores"].append({"gw": g, "points": pts})
         st["banked"] = min(5, st["banked"] + (gw - st["gw"]))
         st["gw"] = gw
+
+    # ---- evaluate this gameweek's transfer window once (before its deadline),
+    # spending banked free transfers only on swaps that clearly pay
+    if st.get("evaluated_gw", st["gw"] - 1) < gw:
+        st["evaluated_gw"] = gw
         while st["banked"] > 0:
             ids = {p["id"] for p in st["squad"]}
             best = None

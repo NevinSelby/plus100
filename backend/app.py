@@ -1327,7 +1327,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     })
             except Exception:  # noqa: BLE001
                 continue
-    out.sort(key=lambda f: (f["rank"], f["kickoff"]))
+    out.sort(key=lambda f: (f["kickoff"], f["rank"]))   # soonest first, all leagues mixed
     payload = {"fixtures": out[:limit], "count": len(out), "note": note}
     _fixtures_cache[key] = (time.time(), payload)
     return payload
