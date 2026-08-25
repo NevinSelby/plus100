@@ -192,6 +192,21 @@ function pickTeam(key, t) {
     const img = $("img.badge", slot);
     if (info.badge) { img.src = info.badge; img.hidden = false; }
   }).catch(() => {});
+  // live team condition: dynamic rating + who is missing today
+  api("/api/teamstate", { team_id: t.id }).then(st => {
+    Object.assign(t, st);
+    if (S[key] !== t) return;
+    const bits = [t.league || ""];
+    if (st.elo_delta) {
+      bits.push(`elo ${st.elo} → now ${st.elo_effective}`);
+      bits.push(`${st.outs.length} out`);
+    } else if (isFinite(st.elo)) {
+      bits.push(`elo ${st.elo}`);
+    }
+    $(".meta", slot).textContent = bits.filter(Boolean).join(" · ");
+    $(".meta", slot).title = (st.outs || []).length
+      ? "Missing per live availability and news: " + st.outs.join(", ") : "";
+  }).catch(() => {});
 }
 const updateGo = () => { $("#go").disabled = !(S.home && S.away); };
 wireSlot("#slot-home", "home"); wireSlot("#slot-away", "away");
@@ -281,7 +296,7 @@ function heroHTML(p) {
       ${S.home?.stadium && !$("#neutral").checked ? `<div class="venue">${ICONS.pin} ${esc(S.home.stadium)}${S.home.capacity ? ` · ${Number(S.home.capacity).toLocaleString()} seats` : ""}</div>` : ""}
       <div class="tiles">
         <div class="tile"><b>${Number(p.expected_goals.home).toFixed(1)}–${Number(p.expected_goals.away).toFixed(1)}</b><span>expected goals</span></div>
-        <div class="tile"><b style="color:#5CE690">${p.model_detail.elo_diff > 0 ? "+" : ""}${Math.round(p.model_detail.elo_diff)}</b><span>elo difference</span></div>
+        <div class="tile" title="${esc(p.elo_note || "")}"><b style="color:#5CE690">${(() => { const d = (p.home.elo_effective != null && p.away.elo_effective != null) ? p.home.elo_effective - p.away.elo_effective : p.model_detail.elo_diff; return (d > 0 ? "+" : "") + Math.round(d); })()}</b><span>elo edge, today's squads</span></div>
         <div class="tile"><b style="color:#FFD27A">${(100 - Math.max(m.home, m.draw, m.away) * 100).toFixed(0)}%</b><span>misses anyway</span></div>
       </div>
       <button class="mathbtn" id="mathbtn">${ICONS.divide} The math, with this match's numbers</button>
@@ -426,7 +441,7 @@ function openMath(p) {
     <div class="mini" style="margin-top:0">${esc(p.home.name)} v ${esc(p.away.name)}, in plain words with this match's real values.</div>
 
     <div class="step">${ICONS.bar} Step 1 · How strong is each team?</div>
-    <p>Every team carries a strength rating that rises when it beats good opponents and falls when it loses to weak ones, built from ${S.meta ? S.meta.matches.toLocaleString() : "154,000"} matches with recent games counting most. Here the gap is <b class="k">${gap} points in favor of ${esc(stronger)}</b>. Gaps like that historically mean the stronger side gets the better of the matchup about <b class="k">${gapWin}%</b> of the time before anything else is considered.</p>
+    <p>Every team carries a strength rating that rises when it beats good opponents and falls when it loses to weak ones, built from ${S.meta ? S.meta.matches.toLocaleString() : "154,000"} matches with recent games counting most. The rating is not a one-off number: it re-learns from every new result at each data refresh, and today's effective rating additionally discounts players who are missing right now${p.home.elo_delta || p.away.elo_delta ? ` (here: ${esc(p.home.name)} ${p.home.elo} → ${p.home.elo_effective}, ${esc(p.away.name)} ${p.away.elo} → ${p.away.elo_effective})` : ""}. Here the gap is <b class="k">${gap} points in favor of ${esc(stronger)}</b>. Gaps like that historically mean the stronger side gets the better of the matchup about <b class="k">${gapWin}%</b> of the time before anything else is considered.</p>
 
     <div class="step">${ICONS.users} Step 2 · Who can actually play?</div>
     <p>Before any goals are estimated, we assemble each side's probable players from the official squad lists, then remove anyone the league's availability flags or the day's team news say is out or doubtful. A missing player takes his usual share of his team's goals with him. ${absences.length ? "For this match that mattered: " + esc(absences.map(a => a.split(":")[0].replace("Adjusted for ", "").replace("Team news suggests ", "")).join("; ")) + "." : "For this match, nobody relevant is flagged as missing right now."}</p>
