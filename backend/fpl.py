@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 
@@ -281,7 +282,16 @@ def _xpts(e: dict, ctx: dict, pool: dict):
     saves = (e.get("saves", 0) / games) / 3 * p60 if pos == 1 else 0.0
     cards = -0.12 * p_play
 
-    total = appearance + goals_pts + assist_pts + cs_pts + conceded_pen + bonus + saves + cards
+    # 2025/26 rule: 2 pts for reaching the defensive-contribution threshold
+    # (10 actions for defenders, 12 for everyone else). Probability of reaching
+    # it approximated from the player's own per-90 rate.
+    dc90 = _num(e.get("defensive_contribution_per_90"))
+    thr = 10.0 if pos == 2 else 12.0
+    p_dc = min(max((dc90 - 0.55 * thr) / (0.9 * thr), 0.0), 0.92) if pos != 1 else 0.0
+    dc_pts = 2.0 * p_dc * p60
+
+    total = (appearance + goals_pts + assist_pts + cs_pts + conceded_pen + bonus
+             + saves + cards + dc_pts)
 
     # Anchor on what the player has actually scored, adjusted for this fixture.
     # Attackers ride their team's expected goals; keepers and defenders ride the
@@ -308,6 +318,7 @@ def _xpts(e: dict, ctx: dict, pool: dict):
             "assists": round(assist_pts * (1 - w), 2),
             "clean_sheet": round(cs_pts * (1 - w), 2),
             "bonus": round((bonus + saves) * (1 - w), 2),
+            "defending": round(dc_pts * (1 - w), 2),
             "other": round((conceded_pen + cards) * (1 - w), 2),
             "his_scoring_record": round(form_pts * w, 2),
         },
@@ -415,6 +426,7 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
 # free transfers each gameweek (never a hit), selling-price simplification noted.
 # State lives in Supabase (fpl_state) so it survives restarts; local file fallback.
 
+_MODEL_LOCK = threading.Lock()
 STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "fpl_state.json"
 GAIN_BAR_MODEL = 0.7
 
@@ -534,6 +546,11 @@ def _best_xi(squad: list, xp: dict):
 
 
 def model_squad(store: Store) -> dict:
+    with _MODEL_LOCK:
+        return _model_squad_locked(store)
+
+
+def _model_squad_locked(store: Store) -> dict:
     gw_data = next_gameweek(store)
     if gw_data.get("error"):
         return gw_data
@@ -563,24 +580,57 @@ def model_squad(store: Store) -> dict:
         st = {"created_gw": gw, "gw": gw, "evaluated_gw": gw - 1, "banked": 1,
               "bank": round(100.0 - sum(p["buy"] for p in squad), 1),
               "squad": squad, "xi": xi_ids, "captain": cap, "vice": vice,
-              "transfers": [], "scores": []}
-        # backfill rounds already played with this exact squad (user held it from GW1)
-        for g in range(1, gw):
-            if g in finished:
-                pts = _score_round(xi_ids, cap, vice, g)
-                if pts is not None:
-                    st["scores"].append({"gw": g, "points": pts})
+              "xi_history": {}, "transfers": [], "scores": []}
+        # the squad was held from GW1, so earlier rounds use this exact snapshot
+        for g in range(1, gw + 1):
+            st["xi_history"][str(g)] = {"xi": xi_ids, "captain": cap, "vice": vice,
+                                        "squad": [{"id": p["id"], "pos": p["pos"]}
+                                                  for p in squad]}
         state_put("model_squad", st)
 
-    # ---- a new gameweek arrived: score the old one and bank the earned transfer
+    st.setdefault("xi_history", {})
+    dirty = False
+    if not st["xi_history"]:
+        # state predates snapshots: rounds before the first transfer were played
+        # with the deterministic seed squad — reconstruct those snapshots
+        try:
+            seed_ids = {}
+            for name, pos in SEED:
+                cands = [e for e in boot["elements"]
+                         if e["web_name"] == name and POS[e["element_type"]] == pos]
+                if cands:
+                    seed_ids[name] = min(cands, key=lambda e: e["now_cost"])["id"]
+            sq = [{"id": seed_ids[n], "pos": p} for n, p in SEED if n in seed_ids]
+            xi_ids = [seed_ids[n] for n in SEED_XI if n in seed_ids]
+            first_tr = min((t["gw"] for t in st["transfers"]), default=st["gw"] + 1)
+            for g in range(1, first_tr):
+                st["xi_history"][str(g)] = {
+                    "xi": xi_ids, "captain": seed_ids.get(SEED_CAPTAIN),
+                    "vice": seed_ids.get(SEED_VICE), "squad": sq}
+            dirty = True
+        except Exception:  # noqa: BLE001
+            pass
+
+    # ---- score every finished round not yet on the board, each with the XI and
+    # squad that were actually held that week (snapshotted at evaluation time)
+    for g in sorted(finished):
+        if str(g) not in st["xi_history"] and g < st["created_gw"]:
+            continue
+        if any(s["gw"] == g for s in st["scores"]):
+            continue
+        snap = st["xi_history"].get(str(g)) or {
+            "xi": st["xi"], "captain": st["captain"], "vice": st["vice"],
+            "squad": [{"id": p["id"], "pos": p["pos"]} for p in st["squad"]]}
+        pts = _score_round(snap["squad"], snap["xi"], snap["captain"], snap["vice"], g)
+        if pts is not None:
+            st["scores"].append({"gw": g, "points": pts})
+            dirty = True
+
+    # ---- a new gameweek arrived: bank the earned transfer(s)
     if st["gw"] < gw:
-        for g in range(st["gw"], gw):
-            if g in finished and not any(s["gw"] == g for s in st["scores"]):
-                pts = _score_round(st["xi"], st["captain"], st["vice"], g)
-                if pts is not None:
-                    st["scores"].append({"gw": g, "points": pts})
         st["banked"] = min(5, st["banked"] + (gw - st["gw"]))
         st["gw"] = gw
+        dirty = True
 
     # ---- evaluate this gameweek's transfer window once (before its deadline),
     # spending banked free transfers only on swaps that clearly pay
@@ -615,6 +665,11 @@ def model_squad(store: Store) -> dict:
         xi, cap, vice = _best_xi(st["squad"], xp)
         st["xi"] = [p["id"] for p in xi]
         st["captain"], st["vice"] = cap, vice
+        st["xi_history"][str(gw)] = {"xi": st["xi"], "captain": cap, "vice": vice,
+                                     "squad": [{"id": p["id"], "pos": p["pos"]}
+                                               for p in st["squad"]]}
+        state_put("model_squad", st)
+    elif dirty:
         state_put("model_squad", st)
 
     # ---- build the live view

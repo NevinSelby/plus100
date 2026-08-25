@@ -63,7 +63,6 @@ h3.sec .note { margin-left: auto; font-size: 12px; color: var(--muted); font-wei
 }
 .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 18px rgba(12,122,54,.35); }
 .btn:disabled { opacity: .45; pointer-events: none; }
-.btn.ghost { background: var(--panel2); color: var(--ink); }
 
 /* ---------- matchup builder ---------- */
 .slots { display: grid; grid-template-columns: 1fr 60px 1fr; gap: 12px; align-items: stretch; }
@@ -84,7 +83,6 @@ h3.sec .note { margin-left: auto; font-size: 12px; color: var(--muted); font-wei
 .dd button:hover { background: var(--panel2); }
 .dd .l { font-weight: 600; } .dd .s { font-size: 12px; color: var(--muted); }
 .controls { display: flex; align-items: center; gap: 18px; margin-top: 16px; flex-wrap: wrap; }
-.check { display: flex; gap: 8px; align-items: center; color: var(--dim); font-size: 14px; }
 .chips { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
 .chip { border: 1px solid var(--line); border-radius: 999px; padding: 7px 15px;
   color: var(--dim); font-weight: 600; font-size: 13px; background: var(--panel2); }
@@ -204,7 +202,6 @@ td.num, th.num { text-align: right; }
   border-radius: 13px; padding: 10px 14px; margin-top: 12px; flex-wrap: wrap; }
 .bench .bp { text-align: center; width: 62px; font-size: 10.5px; color: var(--dim); }
 .bench img { width: 36px; height: 36px; border-radius: 18px; object-fit: cover; }
-.budget { display: flex; justify-content: space-between; align-items: baseline; margin: 14px 0 6px; }
 .budget b.okc { color: var(--pitch); } .budget b.overc { color: var(--red); }
 
 @media (max-width: 780px) {

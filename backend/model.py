@@ -20,7 +20,8 @@ from .data_store import Store
 
 MAX_GOALS = 10
 DC_RHO = -0.10          # Dixon-Coles low-score correlation
-ELO_HOME_ADV = 62.0
+ELO_HOME_ADV_CLUB = 60.0   # matches the HA used when pre_elo_diff was built
+ELO_HOME_ADV_INTL = 55.0
 
 
 def dc_tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
@@ -85,7 +86,7 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
     # --- estimate 2: Elo difference -> goals (global, cross-league comparable)
     fit = store.goal_fit_intl if intl else store.goal_fit_club
     eh, ea = rh["elo_global"], ra["elo_global"]
-    d = (eh + (0.0 if neutral else ELO_HOME_ADV) - ea) / 400.0
+    d = (eh + (0.0 if neutral else (ELO_HOME_ADV_INTL if intl else ELO_HOME_ADV_CLUB)) - ea) / 400.0
     a, c = fit["a"], fit["c"]
     if neutral:
         a = c = (fit["a"] + fit["c"]) / 2
@@ -230,31 +231,6 @@ def _absence_factor(store: Store, tid: str, out_players: list[str]) -> tuple[flo
 # --- same-game parlay legs: each is a boolean condition over (home goals, away goals)
 _G = np.arange(MAX_GOALS + 1)
 _H, _A = np.meshgrid(_G, _G, indexing="ij")
-PARLAY_LEGS = {
-    "home":       ("Home win",            _H > _A),
-    "draw":       ("Draw",                _H == _A),
-    "away":       ("Away win",            _H < _A),
-    "1x":         ("Home or draw",        _H >= _A),
-    "x2":         ("Away or draw",        _H <= _A),
-    "12":         ("No draw",             _H != _A),
-    "o1.5":       ("Over 1.5 goals",      _H + _A > 1.5),
-    "u1.5":       ("Under 1.5 goals",     _H + _A < 1.5),
-    "o2.5":       ("Over 2.5 goals",      _H + _A > 2.5),
-    "u2.5":       ("Under 2.5 goals",     _H + _A < 2.5),
-    "o3.5":       ("Over 3.5 goals",      _H + _A > 3.5),
-    "u3.5":       ("Under 3.5 goals",     _H + _A < 3.5),
-    "btts":       ("Both teams score",    (_H > 0) & (_A > 0)),
-    "no_btts":    ("Not both score",      (_H == 0) | (_A == 0)),
-    "home_o0.5":  ("Home scores 1+",      _H > 0.5),
-    "home_o1.5":  ("Home scores 2+",      _H > 1.5),
-    "home_o2.5":  ("Home scores 3+",      _H > 2.5),
-    "away_o0.5":  ("Away scores 1+",      _A > 0.5),
-    "away_o1.5":  ("Away scores 2+",      _A > 1.5),
-    "away_o2.5":  ("Away scores 3+",      _A > 2.5),
-    "home_cs":    ("Home clean sheet",    _A == 0),
-    "away_cs":    ("Away clean sheet",    _H == 0),
-}
-
 
 FIRST_HALF_GOAL_SHARE = 0.456   # empirical share of goals scored before HT
 N_SIMS = 150_000
@@ -325,14 +301,14 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
             exh = _team_extras(store, home, "home")
             exa = _team_extras(store, away, "away")
             lg = store.extras_league
-            # attacking tilt nudges corner expectation toward the stronger side
+            # attacking tilt nudges corner expectation toward the stronger side.
+            # Home sides win ~54% of corners empirically; the old 0.4+0.55*tilt
+            # curve handed them ~67%+ and inflated every home-corners-over leg.
             tilt = lh / (lh + la)
             base_total = (exh["cf"] + exa["ca"]) / 2 + (exa["cf"] + exh["ca"]) / 2
-            mu_h = base_total * (0.4 + 0.55 * tilt)
+            home_share = (0.5 if neutral else 0.54) + 0.35 * (tilt - 0.5)
+            mu_h = base_total * min(max(home_share, 0.30), 0.75)
             mu_a = base_total - mu_h
-            if neutral:  # strip home-side corner bias for neutral venues
-                adj = (lg["corners_home"] - lg["corners_away"]) / 2
-                mu_h, mu_a = mu_h - adj / 2, mu_a + adj / 2
             sims["ch"] = rng.poisson(max(mu_h, 0.5), n)
             sims["ca_"] = rng.poisson(max(mu_a, 0.5), n)
             sims["corners"] = True
@@ -520,37 +496,6 @@ def suggest_parlays(store: Store, home: str, away: str,
         })
     out.sort(key=lambda x: -x["joint_prob"])
     return out
-
-
-def parlay_joint(store: Store, home: str, away: str, legs: list[str],
-                 neutral: bool = False) -> dict:
-    """Exact joint probability of same-game parlay legs from the score matrix.
-    Correlations between legs are inherent — no independence assumption."""
-    eg = expected_goals(store, home, away, neutral, context)
-    mat = score_matrix(eg["lambda_home"], eg["lambda_away"])
-    bad = [l for l in legs if l not in PARLAY_LEGS]
-    if bad:
-        raise ValueError(f"unknown legs: {bad}")
-    mask = np.ones_like(mat, dtype=bool)
-    out_legs = []
-    naive = 1.0
-    for l in legs:
-        label, m = PARLAY_LEGS[l]
-        p_marg = float(mat[m].sum())
-        naive *= p_marg
-        out_legs.append({"leg": l, "label": label, "marginal_prob": round(p_marg, 4)})
-        mask &= m
-    joint = float(mat[mask].sum())
-    return {
-        "legs": out_legs,
-        "joint_prob": round(joint, 4),
-        "fair_odds": fair(joint),
-        "naive_prob": round(naive, 4),
-        "naive_odds": fair(naive),
-        "correlation_boost": round(joint / naive, 3) if naive > 1e-9 else None,
-        "expected_goals": {"home": round(eg["lambda_home"], 2),
-                           "away": round(eg["lambda_away"], 2)},
-    }
 
 
 def predict(store: Store, home: str, away: str, neutral: bool = False,

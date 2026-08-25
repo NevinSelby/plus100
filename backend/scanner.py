@@ -103,7 +103,7 @@ def scan(key: str, sports: list[str] | None = None, region: str = "us,us2") -> d
                         if cur is None or price > cur["odds"]:
                             outcomes[name] = {"odds": price, "book": bk["title"],
                                               "book_key": bk["key"]}
-            if len(outcomes) < 2:
+            if len(outcomes) < 3:   # soccer is 3-way; a missing Draw is not an arb
                 continue
             inv = sum(1 / o["odds"] for o in outcomes.values())
             legs = [{"outcome": n, "odds": round(o["odds"], 3), "book": o["book"],

@@ -86,7 +86,7 @@ UNDERSTAT_ALIASES = {
     "sd huesca": "huesca", "real oviedo": "oviedo",
     "clermont foot": "clermont", "gfc ajaccio": "ajaccio gfco", "sc bastia": "bastia",
     "zenit st. petersburg": "zenit", "dinamo moscow": "dynamo moscow",
-    "fc krasnodar": "krasnodar", "fc rostov": "rostov", "fc ufa": "ufa",
+    "fc krasnodar": "krasnodar", "fc ufa": "ufa",
     "fc orenburg": "orenburg", "fk akhmat": "akhmat grozny",
     "krylya sovetov samara": "krylya sovetov",
     "anzhi makhachkala": "fk anzi makhackala", "pfc sochi": "sochi",
@@ -479,12 +479,14 @@ class Store:
     # ---------- corners & cards rates (for parlay simulation) ----------
     def _compute_extras(self, half_life_days: float = 420.0):
         m = self.matches
-        mm = m[(m.scope == "club") & m.hc.notna()].copy()
+        # hc/hy were fillna(-1) at load: notna() was always true, letting the -1
+        # sentinel poison every corners/cards average for leagues without the data
+        mm = m[(m.scope == "club") & (m.hc >= 0) & (m.hy >= 0)].copy()
         now = m.date.max()
         mm["w"] = 0.5 ** ((now - mm.date).dt.days / half_life_days)
         mm = mm[mm.w > 0.01]
-        mm["h_cards"] = mm.hy.fillna(0) + mm.hred.fillna(0)
-        mm["a_cards"] = mm.ay.fillna(0) + mm.ared.fillna(0)
+        mm["h_cards"] = mm.hy.clip(lower=0) + mm.hred.clip(lower=0)
+        mm["a_cards"] = mm.ay.clip(lower=0) + mm.ared.clip(lower=0)
         self.extras_league = {
             "corners_home": float((mm.hc * mm.w).sum() / mm.w.sum()),
             "corners_away": float((mm.ac * mm.w).sum() / mm.w.sum()),
@@ -781,7 +783,7 @@ class Store:
                  ((m.home_id == b) & (m.away_id == a))]
 
 
-STORE_CODE_VERSION = 3  # bump when Store gains new computed attributes
+STORE_CODE_VERSION = 4  # bump when Store gains new computed attributes
 
 
 def _bootstrap_download() -> None:

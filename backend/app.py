@@ -181,13 +181,24 @@ def h2h(home: str, away: str):
     }
 
 
-_ABSENCE_WORDS = ("injur", "ruled out", "out for", "sidelined", "doubt", "suspended",
-                  "banned", "surgery", "hamstring", "acl", "fracture", "misses", "miss ")
-_DEPARTURE_WORDS = ("joins ", "signs for", "sold to", "completes move", "transfer agreed",
-                    "departs ", "leaves the club", "left the club", "loan move to")
+_ABSENCE_PATTERNS = [re.compile(rx) for rx in (
+    r"\binjur", r"\bruled out\b", r"\bout for\b", r"\bsidelined\b",
+    r"\bdoubt(?:ful)?\b", r"\bsuspend", r"\bbanned\b", r"\bsurgery\b",
+    r"\bhamstring\b", r"\bacl\b", r"\bfracture\b", r"\bmiss(?:es|ing)?\b")]
+_DEPARTURE_PATTERNS = [re.compile(rx) for rx in (
+    r"\bsigns? for\b", r"\bsold to\b", r"\bcompletes? (?:a )?(?:move|transfer)\b",
+    r"\btransfer agreed\b", r"\bdeparts\b", r"\b(?:leaves|left) the club\b",
+    r"\bloan move to\b")]
 
 
-def _news_scan(tid: str, names: list[str], words: tuple) -> list[str]:
+def _fold(s: str) -> str:
+    """Lowercase, accent-stripped, spaces preserved — safe for word-boundary matching."""
+    return re.sub(r"[^a-z0-9 ]", " ",
+                  unicodedata.normalize("NFKD", str(s))
+                  .encode("ascii", "ignore").decode().lower())
+
+
+def _news_scan(tid: str, names: list[str], patterns: list) -> list[str]:
     try:
         items = news(tid)["items"]
     except Exception:  # noqa: BLE001
@@ -197,10 +208,13 @@ def _news_scan(tid: str, names: list[str], words: tuple) -> list[str]:
         parts = [w for w in str(n).split() if len(w) > 3]
         if not parts:
             continue
-        last = norm_key(parts[-1])
+        last = _fold(parts[-1]).strip()
+        if len(last) < 4:
+            continue
+        name_rx = re.compile(r"\b" + re.escape(last) + r"\b")
         for it in items:
-            title = (it.get("title") or "").lower()
-            if last in norm_key(title) and any(w in title for w in words):
+            title = _fold(it.get("title") or "")
+            if name_rx.search(title) and any(p.search(title) for p in patterns):
                 hits.append(n)
                 break
     return hits
@@ -209,8 +223,8 @@ def _news_scan(tid: str, names: list[str], words: tuple) -> list[str]:
 def _news_absences(tid: str, names: list[str]) -> list[str]:
     """Players from `names` the news says are injured/suspended OR have left the
     club — either way they should not appear in a line-up or count toward goals."""
-    outs = _news_scan(tid, names, _ABSENCE_WORDS)
-    for n in _news_scan(tid, names, _DEPARTURE_WORDS):
+    outs = _news_scan(tid, names, _ABSENCE_PATTERNS)
+    for n in _news_scan(tid, names, _DEPARTURE_PATTERNS):
         if n not in outs:
             outs.append(n)
     return outs
@@ -297,11 +311,21 @@ def predict_endpoint(request: Request, home: str, away: str, neutral: bool = Fal
     p = predict(store, home, away, neutral, out_home=oh or auto_oh,
                 out_away=oa or auto_oa, context=context)
     _verify_squads(p)
+    applied = {a["player"] for side in ("home", "away")
+               for a in (p.get("absences", {}).get(side) or [])}
     for team_name, outs in ((p["home"]["name"], auto_oh), (p["away"]["name"], auto_oa)):
-        if outs:
+        if not outs:
+            continue
+        reduced = [n for n in outs if n in applied]
+        listed = [n for n in outs if n not in applied]
+        if reduced:
             p.setdefault("caveats", []).append(
-                f"Team news suggests {', '.join(outs)} may be unavailable for {team_name}; "
+                f"Team news suggests {', '.join(reduced)} may be unavailable for {team_name}; "
                 "the goal expectation was reduced for the minutes they usually provide.")
+        if listed:
+            p.setdefault("caveats", []).append(
+                f"{', '.join(listed)} flagged as possibly unavailable for {team_name} "
+                "(no per-player goal data for this team, so the numbers are unchanged).")
     try:
         p["home"] |= _effective_elo(home, (oh or auto_oh))
         p["away"] |= _effective_elo(away, (oa or auto_oa))
@@ -424,7 +448,9 @@ def _tsdb_team(team_id: str) -> dict:
                      "colors": [c for c in (best.get("strColour1"), best.get("strColour2"))
                                 if c and c.startswith("#") and len(c) == 7]}
     except Exception:  # noqa: BLE001
-        pass
+        return entry            # transient failure: do not freeze an empty entry
+    if not entry.get("tsdb_name"):
+        return entry            # nothing found: retry next time rather than cache
     with _logo_lock:
         _logo_cache[team_id] = entry
         LOGO_CACHE_FILE.write_text(json.dumps(_logo_cache))
@@ -576,12 +602,11 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
     return best
 
 
-_ROW_CAPS = {"GK": 1, "DEF": 5, "MID": 5, "FWD": 3}
 
 # Real shapes managers actually pick, in rough order of how common they are.
 # A line-up is only ever shown as one of these, so no 1-3-3 nonsense can appear.
 FORMATIONS = [(4, 3, 3), (4, 4, 2), (4, 2, 3, 1), (3, 5, 2), (4, 5, 1),
-              (3, 4, 3), (5, 3, 2), (5, 4, 1), (4, 1, 4, 1), (3, 4, 3)]
+              (3, 4, 3), (5, 3, 2), (5, 4, 1), (4, 1, 4, 1)]
 
 
 def _pick_formation(n_def: int, n_mid: int, n_fwd: int) -> tuple[int, int, int] | None:
@@ -698,8 +723,8 @@ def _team_lineup(tid: str, lam: float) -> dict:
     if shape is None:
         # not enough known players for a real shape: show whoever we do know,
         # capped per position, rather than inventing a formation
-        counts = {"DEF": min(len(pool["DEF"]), 5), "MID": min(len(pool["MID"]), 5),
-                  "FWD": min(len(pool["FWD"]), 3)}
+        counts = {"DEF": min(len(pool["DEF"]), 4), "MID": min(len(pool["MID"]), 3),
+                  "FWD": min(len(pool["FWD"]), 3)}   # matches the 4-3-3 padding target
     else:
         counts = {"DEF": shape[0], "MID": shape[1], "FWD": shape[2]}
 
@@ -780,11 +805,12 @@ def _player_current_team(player: str) -> str | None:
             return hit.get("team") if isinstance(hit, dict) else None
     except Exception:  # noqa: BLE001
         return hit.get("team") if isinstance(hit, dict) else None
-    _player_team_cache[key] = {"team": team, "ts": time.time()}
-    try:
-        PLAYER_TEAM_CACHE_FILE.write_text(json.dumps(_player_team_cache))
-    except OSError:
-        pass
+    with _logo_lock:                      # same lock family as the other disk caches
+        _player_team_cache[key] = {"team": team, "ts": time.time()}
+        try:
+            PLAYER_TEAM_CACHE_FILE.write_text(json.dumps(_player_team_cache))
+        except OSError:
+            pass
     return team
 
 
@@ -1214,7 +1240,11 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                if reg["scope"] == "club"}
     from .data_store import LEAGUE_NAMES
 
-    now = datetime.utcnow()
+    try:
+        from zoneinfo import ZoneInfo
+        now = datetime.now(ZoneInfo("Europe/London")).replace(tzinfo=None)
+    except Exception:  # noqa: BLE001
+        now = datetime.utcnow()
     horizon = now + timedelta(days=days)
     out = []
     for row in csv.DictReader(_io.StringIO(text)):

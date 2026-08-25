@@ -15,13 +15,10 @@ Object.assign(ICONS, {
   target: FE('<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="6"/><circle cx="12" cy="12" r="2"/>'),
   repeat: FE('<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>'),
   star: FE('<path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>'),
-  calendar: FE('<rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>'),
-  pie: FE('<path d="M21.21 15.89A10 10 0 118 2.83"/><path d="M22 12A10 10 0 0012 2v10z"/>'),
   divide: FE('<circle cx="12" cy="12" r="10"/><path d="M8 12h8M12 8h.01M12 16h.01"/>'),
   bar: FE('<path d="M12 20V10M18 20V4M6 20v-4"/>'),
   check: FE('<path d="M22 11.08V12a10 10 0 11-5.93-9.14"/><path d="M22 4L12 14.01l-9 -9"/>'),
   dollar: FE('<path d="M12 1v22M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/>'),
-  userx: FE('<path d="M16 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="8.5" cy="7" r="4"/><path d="M18 8l5 5M23 8l-5 5"/>'),
 });
 const LOADER = (label) => `<div class="loading"><div class="ball">${ICONS.ball}</div><div class="ballshadow"></div>${label}</div>`;
 const $ = (s, r) => (r || document).querySelector(s);
@@ -135,6 +132,8 @@ const ctxScope = () => (!S.home || !S.away) ? "any"
 function renderChips() {
   const box = $("#ctxchips"); box.innerHTML = "";
   const sc = ctxScope();
+  const curDef = CONTEXTS.find(([k]) => k === S.context);
+  if (curDef && curDef[3] !== "any" && sc !== "any" && curDef[3] !== sc) S.context = "";
   for (const [k, label, blurb, scope] of CONTEXTS) {
     const b = h("button", "chip" + (S.context === k ? " on" : ""), esc(label));
     const ok = scope === "any" || sc === "any" || scope === sc;
@@ -184,7 +183,7 @@ function pickTeam(key, t) {
   $(".dd", slot).hidden = true;
   slot.classList.add("filled");
   $(".meta", slot).textContent = (t.league || "") + (isFinite(t.elo) ? ` · elo ${Math.round(t.elo)}` : "");
-  updateGo(); renderChips();
+  updateGo(); renderChips(); sweepLabel();
   if (S.home && S.away)   // real home fixture unless it's country vs country
     $("#neutral").checked = S.home.scope === "intl" && S.away.scope === "intl";
   logoWaits[key] = api("/api/logo", { team_id: t.id }).then(info => {
@@ -216,9 +215,9 @@ $("#go").onclick = () => predictNow();
 async function loadFixtures() {
   const box = $("#fixtures");
   try {
-    const d = await api("/api/fixtures/upcoming", { days: 8, limit: 26 });
+    const d = await api("/api/fixtures/upcoming", { days: 8, limit: 26, _: Date.now() });
     box.innerHTML = "";
-    $("#fxnote").textContent = d.fixtures.length + " matches found";
+    $("#fxnote").textContent = d.fixtures.length + (d.count > d.fixtures.length ? ` of ${d.count}` : "") + " matches";
     if (!d.fixtures.length) { box.append(h("div", "mini", "No confirmed fixtures in the feed right now — between rounds this list can be empty.")); return; }
     d.fixtures.forEach(f => {
       const ko = new Date(f.kickoff);
@@ -242,14 +241,16 @@ async function loadFixtures() {
       c.classList.add("a-rise"); c.style.animationDelay = (i * 40) + "ms"; });
   } catch {
     box.innerHTML = "";
-    box.append(h("div", "mini", "Couldn't load the live schedule. It retries next visit."));
+    box.append(h("div", "mini", "Couldn't load the live schedule. It retries automatically."));
   }
 }
+setInterval(loadFixtures, 15 * 60 * 1000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) loadFixtures(); });
 
 /* ---- prediction flow ---- */
 async function predictNow() {
   const out = $("#results");
-  out.innerHTML = LOADER("replaying 154,000 matches of history…");
+  out.innerHTML = LOADER(`replaying ${S.meta ? S.meta.matches.toLocaleString() : "154,000"} matches of history…`);
   const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
   try {
     await Promise.allSettled([logoWaits.home, logoWaits.away]);
@@ -394,7 +395,7 @@ function renderPrediction(out, p, hh, lu) {
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.clock} When the goals should come <span class="note">stoppage-time spikes are real</span></h3>${goalRiver(p, khl, kal)}
         <div class="mini">Each side's scoring threat minute by minute, in their real colors. The wider the river, the likelier they strike.</div></div>
-      <div class="card"><h3 class="sec">${ICONS.grid} Exact score probabilities <span class="note">most likely ≈ 1 in 9</span></h3>
+      <div class="card"><h3 class="sec">${ICONS.grid} Exact score probabilities <span class="note">most likely ≈ 1 in ${Math.max(2, Math.round(1 / p.markets.correct_scores[0].prob))}</span></h3>
         <table class="heat"><tr><td></td>${[...Array(N)].map((_, j) => `<td class="mini">${j}</td>`).join("")}</tr>${heat}</table>
         <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals</div>
         <div class="scores">${p.markets.correct_scores.slice(0, 4).map(cs => `<div class="sc"><b>${esc(cs.score)}</b><span>${pct(cs.prob)}</span></div>`).join("")}</div></div>
@@ -465,12 +466,17 @@ function openMath(p) {
 }
 
 /* ---- vs market ---- */
+function sweepLabel() {
+  $("#sweep").textContent = S.home && S.away
+    ? `Grade ${S.home.name} v ${S.away.name}` : "Scan the next two days";
+}
 $("#sweep").onclick = async () => {
   const out = $("#marketout");
   out.innerHTML = LOADER("shopping 15 sportsbooks for prices…");
   try {
     const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
     const d = await api("/api/bestbets", params);
+    if (d.error) { out.innerHTML = `<div class="err">${esc(d.detail || d.error)}</div>`; return; }
     const rows = d.selected?.bets || d.bets || [];
     out.innerHTML = "";
     if (!rows.length) {
@@ -521,95 +527,26 @@ async function loadParlays() {
 }
 
 /* ---- fantasy ---- */
-const XI_CAPS = { GK: 1, DEF: 5, MID: 5, FWD: 3 }, XI_MIN = { GK: 1, DEF: 3, MID: 2, FWD: 1 };
-const SQUAD_QUOTA = { GK: 2, DEF: 5, MID: 5, FWD: 3 }, BUDGET = 100.0, CLUB_MAX = 3;
-const cost = (l) => l.reduce((t, p) => t + p.price, 0);
-const clubCount = (l, team) => l.filter(p => p.team === team).length;
-function buildSquad(players) {
-  const xi = [], cnt = { GK: 0, DEF: 0, MID: 0, FWD: 0 };
-  for (const pos of ["GK","DEF","MID","FWD"]) for (const p of players) {
-    if (cnt[pos] >= XI_MIN[pos]) break;
-    if (p.pos === pos && clubCount(xi, p.team) < CLUB_MAX) { xi.push(p); cnt[pos]++; }
-  }
-  const inXi = new Set(xi.map(p => p.id));
-  for (const p of players) {
-    if (xi.length >= 11) break;
-    if (p.pos === "GK" || inXi.has(p.id)) continue;
-    if (cnt[p.pos] < XI_CAPS[p.pos] && clubCount(xi, p.team) < CLUB_MAX) { xi.push(p); cnt[p.pos]++; inXi.add(p.id); }
-  }
-  const bench = [];
-  for (const pos of ["GK","DEF","MID","FWD"]) {
-    const have = () => [...xi, ...bench];
-    const need = SQUAD_QUOTA[pos] - have().filter(p => p.pos === pos).length;
-    const opts = players.filter(p => p.pos === pos && !have().some(q => q.id === p.id))
-      .sort((a, b) => a.price - b.price || b.xpts - a.xpts);
-    let added = 0;
-    for (const p of opts) { if (added >= need) break;
-      if (clubCount(have(), p.team) >= CLUB_MAX) continue; bench.push(p); added++; }
-  }
-  const total = () => cost(xi) + cost(bench);
-  let guard = 80;
-  while (total() > BUDGET && guard-- > 0) {
-    const taken = new Set([...xi, ...bench].map(p => p.id));
-    let best = null;
-    for (let i = 0; i < xi.length; i++) { const out = xi[i];
-      for (const p of players) {
-        if (p.pos !== out.pos || p.price >= out.price || taken.has(p.id)) continue;
-        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), p.team) >= CLUB_MAX) continue;
-        const pain = (out.xpts - p.xpts) / (out.price - p.price);
-        if (!best || pain < best.pain) best = { i, p, pain };
-      } }
-    if (!best) break; xi[best.i] = best.p;
-  }
-  const single = () => {
-    const taken = new Set([...xi, ...bench].map(p => p.id)); let best = null;
-    for (let i = 0; i < xi.length; i++) { const out = xi[i];
-      for (const p of players) {
-        if (p.pos !== out.pos || taken.has(p.id) || p.xpts <= out.xpts) continue;
-        if (total() - out.price + p.price > BUDGET) continue;
-        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), p.team) >= CLUB_MAX) continue;
-        const gain = p.xpts - out.xpts; if (!best || gain > best.gain) best = { i, p, gain };
-      } }
-    if (best) { xi[best.i] = best.p; return true; } return false;
-  };
-  const pair = () => {
-    const stars = players.slice(0, 60);
-    const taken = new Set([...xi, ...bench].map(p => p.id)); let best = null;
-    for (let i = 0; i < xi.length; i++) { const out = xi[i];
-      for (const c of stars) {
-        if (c.pos !== out.pos || taken.has(c.id) || c.xpts <= out.xpts) continue;
-        if (clubCount(xi.filter((_, j) => j !== i).concat(bench), c.team) < CLUB_MAX) continue;
-        for (let k = 0; k < xi.length; k++) {
-          if (k === i || xi[k].team !== c.team) continue; const mm = xi[k];
-          for (const r of players) {
-            if (r.pos !== mm.pos || taken.has(r.id) || r.id === c.id) continue;
-            if (clubCount(xi.filter((_, j) => j !== i && j !== k).concat(bench, [c]), r.team) >= CLUB_MAX) continue;
-            if (total() - out.price - mm.price + c.price + r.price > BUDGET) continue;
-            const net = (c.xpts - out.xpts) + (r.xpts - mm.xpts);
-            if (net > 0.01 && (!best || net > best.net)) best = { i, k, c, r, net };
-          } } } }
-    if (best) { xi[best.i] = best.c; xi[best.k] = best.r; return true; } return false;
-  };
-  guard = 30;
-  while (guard-- > 0) { if (!single() && !pair()) break; }
-  return { xi, bench };
-}
-
 async function loadFPL() {
   const out = $("#fplout");
   try {
     const [gw, team] = await Promise.all([api("/api/fpl/gw"), api("/api/fpl/squad")]);
     if (gw.error) { out.innerHTML = `<div class="card mini">${esc(gw.detail || gw.error)}</div>`; return; }
-    S.fplLoaded = true;
     $("#fpl-title").textContent = "Fantasy · " + gw.name;
     S.gw = gw; S.team = team.error ? null : team;
+    S.fplLoaded = !!S.team;
     renderFPL(out);
   } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 
 function renderFPL(out) {
   const gw = S.gw, t = S.team;
-  if (!t) { out.innerHTML = `<div class="card mini">The model team is unavailable right now.</div>`; return; }
+  if (!t) {
+    out.innerHTML = `<div class="grid2"><div class="card mini">The model team is unavailable right now; it retries when you come back to this tab.</div>
+      <div class="card" style="max-height:900px;overflow:auto"><h3 class="sec">Top projected players</h3>
+      ${gw.players.slice(0, 40).map(p => `<div class="mini" style="padding:6px 0;border-bottom:1px solid var(--panel2)"><b>${esc(p.name)}</b> ${esc(p.pos)} · ${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)} · £${p.price}m · ${p.xpts.toFixed(1)} xPts</div>`).join("")}</div></div>`;
+    return;
+  }
   const byId = Object.fromEntries(t.squad.map(p => [p.id, p]));
   const xi = t.xi.map(id => byId[id]).filter(Boolean);
   const bench = t.squad.filter(p => !t.xi.includes(p.id));
@@ -681,7 +618,7 @@ function renderAbout() {
     <p class="sub">Accuracy is re-measured automatically at every data refresh. Random guessing on three outcomes gets 33%; always picking the home side about 44%. Probabilities are calibrated: when we say 40%, it happens about 40% of the time.</p>
     ${fe ? `<h3 class="sec">How good the fantasy projections are</h3><p class="sub">${esc(fe.note)}</p>` : ""}
     <h3 class="sec">Where edges really come from</h3>
-    <p class="sub">Against closing prices nothing out-predicts the market, including this model — tested across four separate six-month windows and about 19,600 matches. Edges come from disagreements between books, soft early prices, and boosts. That is what Vs Market hunts.</p>
+    <p class="sub">Against closing prices nothing out-predicts the market, including this model — tested on thousands of unseen matches, adding our model to the closing price made predictions slightly worse, not better. Edges come from disagreements between books, soft early prices, and boosts. That is what Vs Market hunts.</p>
     <h3 class="sec">Play it safe</h3>
     <p class="sub">Only bet money you can afford to lose. If it stops being fun, call 1-800-GAMBLER — free, confidential, always open. Nothing here is financial advice; you alone decide whether and how much to bet.</p>`;
 }

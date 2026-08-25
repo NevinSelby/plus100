@@ -2,7 +2,7 @@
 probabilities with the de-vigged market consensus, and rank every available
 price by expected value.
 
-The blend (60% market / 40% model) exists because the market consensus is the
+The blend (75% market / 25% model) exists because the market consensus is the
 strongest public predictor available; anchoring to it and deviating only where
 the model disagrees is how professional bettors use models. Edges reported are
 therefore conservative — a bet only surfaces when its price beats a
@@ -184,8 +184,14 @@ def _grade_event(store: Store, ev: dict, sport: str, scope: str, neutral: bool,
             per_line: dict = {}
             for oc in mkt.get("outcomes", []):
                 point = oc.get("point")
-                gk = (abs(float(point)) if mkey == "spreads" else point) \
-                    if point is not None else None
+                # group spreads by the HOME team's signed line: Home -1.5 and
+                # Home +1.5 are different propositions and must never be pooled
+                if point is not None and mkey == "spreads":
+                    gk = float(point) if oc["name"] == ev.get("home_team") else -float(point)
+                elif point is not None:
+                    gk = point
+                else:
+                    gk = None
                 per_line.setdefault(gk, {})[oc["name"]] = (float(oc["price"]), point)
             for gk, prices in per_line.items():
                 groups.setdefault((mkey, gk), {})[(bk["key"], bk["title"])] = prices
@@ -235,7 +241,7 @@ def _grade_event(store: Store, ev: dict, sport: str, scope: str, neutral: bool,
 def _targeted(key: str, store: Store, market_weight: float,
               sel_home: str, sel_away: str) -> dict:
     """Selected-match mode: free events calls to locate the fixture, then ONE
-    paid per-event odds call. Costs ~2 credits (0 if the fixture isn't listed)."""
+    paid per-event odds call. Costs ~8 credits (four markets) (0 if the fixture isn't listed)."""
     t_from, t_to = _window()
     remaining, errors = None, []
     for sport in candidate_sports(store, sel_home, sel_away):
