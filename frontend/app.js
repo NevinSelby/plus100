@@ -598,39 +598,36 @@ function buildSquad(players) {
 async function loadFPL() {
   const out = $("#fplout");
   try {
-    const gw = await api("/api/fpl/gw");
+    const [gw, team] = await Promise.all([api("/api/fpl/gw"), api("/api/fpl/squad")]);
     if (gw.error) { out.innerHTML = `<div class="card mini">${esc(gw.detail || gw.error)}</div>`; return; }
     S.fplLoaded = true;
     $("#fpl-title").textContent = "Fantasy · " + gw.name;
-    S.squad = buildSquad(gw.players);
-    S.gw = gw; S.editing = null;
+    S.gw = gw; S.team = team.error ? null : team;
     renderFPL(out);
   } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 
 function renderFPL(out) {
-  const { xi, bench } = S.squad, gw = S.gw;
-  const capt = [...xi].sort((a, b) => b.xpts - a.xpts)[0];
-  const score = xi.reduce((t, p) => t + p.xpts, 0) + (capt ? capt.xpts : 0);
-  const tot = cost(xi) + cost(bench);
+  const gw = S.gw, t = S.team;
+  if (!t) { out.innerHTML = `<div class="card mini">The model team is unavailable right now.</div>`; return; }
+  const byId = Object.fromEntries(t.squad.map(p => [p.id, p]));
+  const xi = t.xi.map(id => byId[id]).filter(Boolean);
+  const bench = t.squad.filter(p => !t.xi.includes(p.id));
+  const capName = byId[t.captain] ? byId[t.captain].name : "";
   const XI_ROW = { GK: 0.9, DEF: 0.7, MID: 0.47, FWD: 0.22 };
   const rows = { GK: [], DEF: [], MID: [], FWD: [] };
   xi.forEach(p => rows[p.pos].push(p));
   let dots = "";
   Object.entries(rows).forEach(([pos, list]) => list.forEach((p, i) => {
-    dots += `<div class="pdot" data-id="${p.id}" style="left:${(i+1)/(list.length+1)*100}%;top:${XI_ROW[pos]*100}%">
-      <div class="face" style="border-color:${p.id === capt.id ? "#FFD24A" : (S.editing && S.editing.id === p.id ? "#FFD24A" : "#fff")}">
+    dots += `<div class="pdot" style="left:${(i+1)/(list.length+1)*100}%;top:${XI_ROW[pos]*100}%">
+      <div class="face" style="border-color:${p.id === t.captain ? "#FFD24A" : "#fff"}">
         ${p.photo ? `<img src="${esc(p.photo)}" onerror="this.replaceWith('${esc(initialsOf(p.name))}')">` : esc(initialsOf(p.name))}</div>
       <span class="pill" style="background:${rateColor(p.xpts, 5, 3)}">${p.xpts.toFixed(1)}</span>
-      <div class="nm">${esc(p.name)}</div></div>`;
+      <div class="nm">${esc(p.name)}${p.id === t.captain ? " (C)" : ""}</div></div>`;
   }));
-  const ids = new Set([...xi, ...bench].map(p => p.id));
-  const alts = S.editing ? gw.players.filter(p => p.pos === S.editing.pos && !ids.has(p.id)).slice(0, 9) : [];
-  const altProblem = (p) => {
-    if (clubCount(xi.filter(x => x.id !== S.editing.id).concat(bench), p.team) >= CLUB_MAX) return `already 3 from ${p.team}`;
-    if (tot - S.editing.price + p.price > BUDGET) return "over the £100m budget";
-    return null;
-  };
+  const move = t.this_week.length
+    ? t.this_week.map(x => `<b>${esc(x.out)}</b> out, <b>${esc(x.in)}</b> in (+${x.gain} projected)`).join("; ")
+    : "held — no swap cleared the bar, the free transfer banks for next week";
   const table = (list, title) => `<h3 class="sec">${title}</h3><table>
     <tr><th></th><th>Player</th><th>Fixture</th><th class="num">Price</th><th class="num">xPts</th></tr>
     ${list.map(p => `<tr><td>${p.photo ? `<img class="face-s" src="${esc(p.photo)}" onerror="this.remove()">` : ""}</td>
@@ -641,12 +638,14 @@ function renderFPL(out) {
 
   out.innerHTML = `<div class="grid2">
     <div class="card">
-      <div class="budget"><div><div class="mini">projected points, captain doubled</div>
-        <b style="font-size:28px" class="count">${score.toFixed(1)} pts</b>
-        <span class="mini">captain: <b style="color:var(--green-deep)">${esc(capt.name)}</b></span></div>
-        <div style="text-align:right"><div class="mini">squad cost, live prices</div>
-        <b class="${tot > BUDGET ? "overc" : "okc"}">£${tot.toFixed(1)}m of £${BUDGET.toFixed(1)}m</b></div></div>
-      <div class="hbar" style="margin-bottom:14px"><div style="width:${Math.min(tot/BUDGET*100, 100)}%;background:${tot > BUDGET ? "var(--red)" : "var(--pitch)"}"></div></div>
+      <h3 class="sec">${ICONS.star} The Plus100 team — plays by the rules</h3>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><b class="count">${t.season_points}</b><span>actual points so far</span></div>
+        <div class="tile"><b class="count">${t.live_gw_points}</b><span>live, this round</span></div>
+        <div class="tile"><b class="count">${t.projected_points}</b><span>projected next</span></div>
+        <div class="tile"><b>£${t.bank.toFixed(1)}m</b><span>in the bank · ${t.banked_transfers} free transfer${t.banked_transfers === 1 ? "" : "s"}</span></div>
+      </div>
+      <div class="mini" style="margin:10px 0 12px"><b>This week:</b> ${move}. Captain: <b style="color:var(--green-deep)">${esc(capName)}</b>.</div>
       <div class="pitchwrap" style="aspect-ratio:100/118">
         <svg viewBox="0 0 100 118" preserveAspectRatio="none" style="position:absolute;inset:0;width:100%;height:100%">
           <defs><linearGradient id="turf2" x1="0" y1="0" x2="0" y2="1">
@@ -660,35 +659,14 @@ function renderFPL(out) {
       </div>
       <div class="bench"><span class="mini" style="margin-top:0">bench</span>
         ${bench.map(p => `<div class="bp">${p.photo ? `<img src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price}m</div></div>`).join("")}</div>
-      <div class="mini">Real FPL rules at live prices: £100m for the full 15, two keepers, max three per club, legal formations. Gold ring is your captain. Click a player to swap him.</div>
-      ${S.editing ? `<div style="margin-top:14px">${table(alts.map(p => ({...p})), `Swap ${esc(S.editing.name)} for`)}</div>` : ""}
+      ${t.scores.length ? `<div class="mini" style="margin-top:8px">Finished rounds: ${t.scores.map(s => `GW${s.gw}: <b>${s.points}</b>`).join(" · ")}</div>` : ""}
+      <div class="mini" style="margin-top:8px">${esc(t.note)}${t.durable ? "" : " (Warning: durable storage is not connected on this server, so history resets on restart.)"}</div>
     </div>
     <div class="card" style="max-height:900px;overflow:auto">${table(gw.players.slice(0, 40), "Top projected players")}</div>
   </div>`;
-
   animateIn(out);
-  $$(".pdot[data-id]", out).forEach(d => d.onclick = () => {
-    const p = xi.find(x => String(x.id) === d.dataset.id);
-    S.editing = S.editing && S.editing.id === p.id ? null : p;
-    renderFPL(out);
-  });
-  if (S.editing) {
-    const rowsEls = $$("table tr", out).filter(tr => tr.parentElement.closest(".card") === out.querySelector(".card"));
-    $$(".card:first-child table tr", out).slice(1).forEach((tr, i) => {
-      const p = alts[i]; if (!p) return;
-      const problem = altProblem(p);
-      tr.style.cursor = problem ? "not-allowed" : "pointer";
-      tr.style.opacity = problem ? ".45" : "1";
-      if (problem) tr.title = problem;
-      else tr.onclick = () => {
-        S.squad = { xi: xi.map(x => x.id === S.editing.id ? p : x), bench };
-        S.editing = null; renderFPL(out);
-      };
-    });
-  }
 }
 
-/* ---- about ---- */
 function renderAbout() {
   const meta = S.meta, live = meta?.live_eval, fe = meta?.fantasy_eval;
   $("#aboutout").innerHTML = `

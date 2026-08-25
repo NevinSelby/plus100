@@ -876,6 +876,14 @@ def scan_sports(key: str = ""):
 # re-add the /api/sports/* endpoints here when it's wanted again.
 
 
+@app.get("/api/fpl/squad")
+def fpl_model_squad():
+    """The persistent model team: obeys real FPL rules, tracks its real score."""
+    _require_store()
+    from .fpl import model_squad
+    return model_squad(store)
+
+
 @app.get("/api/fpl/gw")
 def fpl_gameweek():
     _require_store()
