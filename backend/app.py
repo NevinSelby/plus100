@@ -991,9 +991,15 @@ def _sb_flusher() -> None:
             batch, _sb_queue[:] = _sb_queue[:], []
         if not batch:
             continue
+        # PostgREST bulk inserts demand identical keys on every row: pad the
+        # short "request" rows so they can share a batch with prediction rows
+        cols = ("kind", "path", "visitor", "home", "away", "context", "neutral")
+        batch = [{c: e.get(c) for c in cols} for e in batch]
         try:
-            requests.post(f"{SB_URL}/rest/v1/usage_events", json=batch,
-                          headers=_sb_headers(), timeout=10)
+            r = requests.post(f"{SB_URL}/rest/v1/usage_events", json=batch,
+                              headers=_sb_headers(), timeout=10)
+            if r.status_code >= 500:          # transient server-side: retry once
+                raise RuntimeError(f"supabase {r.status_code}")
         except Exception:  # noqa: BLE001 — re-queue once so a blip loses nothing
             with _sb_lock:
                 _sb_queue[:0] = batch[-500:]
