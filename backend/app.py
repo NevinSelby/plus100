@@ -1239,9 +1239,43 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
             "odds": odds,
             "rank": _DIV_RANK.get(div, 20),
         })
+    note = ("Confirmed fixtures from the leagues this model is built on. "
+            "Kick-off times are UK time.")
+    if not out:
+        # Between rounds the main feed only holds last weekend's games. The official
+        # Premier League schedule is published for the whole season, so fall back to
+        # it rather than showing an empty rail while a season is running.
+        try:
+            from .fpl import BASE as FPL_BASE
+            from .fpl import _get as fpl_get
+            from .fpl import _team_map
+            boot = fpl_get(f"{FPL_BASE}/bootstrap-static/")
+            tmap = _team_map(store, boot["teams"])
+            for f in fpl_get(f"{FPL_BASE}/fixtures/?future=1"):
+                ko = f.get("kickoff_time")
+                if not ko:
+                    continue
+                kod = datetime.strptime(ko, "%Y-%m-%dT%H:%M:%SZ")
+                if kod > now + timedelta(days=max(days, 12)):
+                    continue
+                th, ta = tmap.get(f["team_h"]), tmap.get(f["team_a"])
+                if not th or not ta or not th["registry_id"] or not ta["registry_id"]:
+                    continue
+                hid, aid = th["registry_id"], ta["registry_id"]
+                out.append({
+                    "home_id": hid, "away_id": aid,
+                    "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
+                    "home_elo": store.registry[hid]["elo_global"],
+                    "away_elo": store.registry[aid]["elo_global"],
+                    "league": "Premier League", "country": "England",
+                    "kickoff": kod.strftime("%Y-%m-%dT%H:%M"), "odds": None, "rank": 1,
+                })
+            if out:
+                note = ("The odds feed is between rounds, so this is the confirmed "
+                        "Premier League schedule. Kick-off times are UK time.")
+        except Exception:  # noqa: BLE001
+            pass
     out.sort(key=lambda f: (f["rank"], f["kickoff"]))
-    payload = {"fixtures": out[:limit], "count": len(out),
-               "note": ("Confirmed fixtures from the leagues this model is built on. "
-                        "Kick-off times are UK time.")}
+    payload = {"fixtures": out[:limit], "count": len(out), "note": note}
     _fixtures_cache[key] = (time.time(), payload)
     return payload
