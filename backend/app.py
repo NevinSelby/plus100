@@ -893,6 +893,72 @@ except Exception:  # noqa: BLE001
     _usage = {"since": time.time(), "daily": {}, "recent": []}
 _usage_dirty = 0
 
+# ---------- durable analytics: Supabase (falls back to the local file) ----------
+# Events stream into a `usage_events` table via PostgREST, batched off-thread so a
+# slow or missing database can never slow a page down. The dashboard reads a
+# `usage_stats()` SQL function; if Supabase is unconfigured or down, it serves
+# the local on-disk aggregates instead.
+
+SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
+SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+_sb_queue: list[dict] = []
+_sb_lock = threading.Lock()
+_sb_flusher_started = False
+
+
+def _sb_headers() -> dict:
+    return {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
+            "Content-Type": "application/json", "Prefer": "return=minimal"}
+
+
+def _sb_log(evt: dict) -> None:
+    if not (SB_URL and SB_KEY):
+        return
+    global _sb_flusher_started
+    with _sb_lock:
+        _sb_queue.append(evt)
+        if len(_sb_queue) > 2000:          # backstop if the database is unreachable
+            del _sb_queue[:1000]
+        if not _sb_flusher_started:
+            _sb_flusher_started = True
+            threading.Thread(target=_sb_flusher, daemon=True,
+                             name="plus100-usage-flush").start()
+
+
+def _sb_flusher() -> None:
+    while True:
+        time.sleep(15)
+        with _sb_lock:
+            batch, _sb_queue[:] = _sb_queue[:], []
+        if not batch:
+            continue
+        try:
+            requests.post(f"{SB_URL}/rest/v1/usage_events", json=batch,
+                          headers=_sb_headers(), timeout=10)
+        except Exception:  # noqa: BLE001 — re-queue once so a blip loses nothing
+            with _sb_lock:
+                _sb_queue[:0] = batch[-500:]
+
+
+def _sb_stats() -> dict | None:
+    if not (SB_URL and SB_KEY):
+        return None
+    try:
+        r = requests.post(f"{SB_URL}/rest/v1/rpc/usage_stats", json={},
+                          headers=_sb_headers(), timeout=12)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        if not isinstance(d, dict):
+            return None
+        d.setdefault("since", time.time())
+        d["note"] = ("Stored durably in Supabase; survives every restart and deploy. "
+                     "No third-party trackers; visitors are one-way hashes.")
+        return d
+    except Exception:  # noqa: BLE001
+        return None
+
+
 ADMIN_USER = "nevinselby"
 
 
@@ -935,6 +1001,7 @@ async def _track_usage(request: Request, call_next):
                 or path in ("/healthz", "/favicon.ico")):
             global _usage_dirty
             vid = _visitor_id(request)
+            _sb_log({"kind": "request", "path": path[:80], "visitor": vid})
             with _usage_lock:
                 d = _day_bucket(time.strftime("%Y-%m-%d"))
                 d["requests"] += 1
@@ -950,6 +1017,11 @@ async def _track_usage(request: Request, call_next):
 
 def _log_prediction(request: Request, p: dict, context: str, neutral: bool) -> None:
     try:
+        _sb_log({"kind": "prediction", "path": "/api/predict",
+                 "visitor": _visitor_id(request),
+                 "home": p["home"]["name"], "away": p["away"]["name"],
+                 "context": context if context not in ("", "none") else "regular",
+                 "neutral": bool(neutral)})
         with _usage_lock:
             _day_bucket(time.strftime("%Y-%m-%d"))["predictions"] += 1
             _usage["recent"] = ([{
@@ -988,6 +1060,9 @@ def _require_admin(request: Request) -> None:
 @app.get("/api/admin/stats")
 def admin_stats(request: Request):
     _require_admin(request)
+    sb = _sb_stats()
+    if sb is not None:
+        return sb
     with _usage_lock:
         daily = [{"date": k, "requests": v["requests"], "visitors": len(v["visitors"]),
                   "predictions": v.get("predictions", 0)}
