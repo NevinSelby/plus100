@@ -23,8 +23,19 @@ Object.assign(ICONS, {
 const LOADER = (label) => `<div class="loading"><div class="ball">${ICONS.ball}</div><div class="ballshadow"></div>${label}</div>`;
 const $ = (s, r) => (r || document).querySelector(s);
 const $$ = (s, r) => [...(r || document).querySelectorAll(s)];
-const api = (p, q) => fetch(p + (q ? "?" + new URLSearchParams(q) : ""))
-  .then(r => { if (!r.ok) throw new Error("server error " + r.status); return r.json(); });
+const api = (p, q) => {
+  const ctl = new AbortController();
+  const to = setTimeout(() => ctl.abort(), 90000);
+  return fetch(p + (q ? "?" + new URLSearchParams(q) : ""), { signal: ctl.signal })
+    .then(async r => {
+      if (!r.ok) {
+        let d = null; try { d = await r.json(); } catch { /* not json */ }
+        throw new Error((d && (d.detail || d.error)) || ("server error " + r.status));
+      }
+      return r.json();
+    })
+    .finally(() => clearTimeout(to));
+};
 const h = (tag, cls, html) => { const e = document.createElement(tag);
   if (cls) e.className = cls; if (html != null) e.innerHTML = html; return e; };
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
@@ -84,7 +95,7 @@ const initialsOf = (n) => n.split(" ").map(w => w[0]).filter(Boolean).slice(0, 2
 const lastName = (n) => n.split(" ").slice(-1)[0];
 
 /* ---- global state ---- */
-const S = { home: null, away: null, context: "", prediction: null, meta: null };
+const S = { home: null, away: null, prediction: null, meta: null, run: 0 };
 
 /* ---- navigation ---- */
 $("#nav").addEventListener("click", (e) => {
@@ -118,37 +129,6 @@ $("#nav").addEventListener("click", (e) => {
   }
 })();
 
-/* ---- match types ---- */
-const CONTEXTS = [
-  ["", "Regular", "A normal league or cup fixture. No adjustment is made.", "any"],
-  ["derby", "Derby", "A local rivalry: tighter, more cautious. Expected goals trimmed about 5% (research-based).", "club"],
-  ["friendly", "Friendly", "An exhibition with nothing at stake. Measured on 9,740 friendlies: about 8% fewer goals.", "intl"],
-  ["qualifier", "Qualifier", "A qualifying tie. Across 11,484 of them: about 3% more goals.", "intl"],
-  ["finals", "Tournament", "A finals-tournament match. Across 8,184: about 4% more goals.", "intl"],
-  ["third_place", "3rd place", "Both sides free of pressure: about 21% more goals, from only 70 matches, so a strong hint rather than a hard number.", "intl"],
-];
-const ctxScope = () => (!S.home || !S.away) ? "any"
-  : (S.home.scope === "intl" && S.away.scope === "intl" ? "intl" : "club");
-function renderChips() {
-  const box = $("#ctxchips"); box.innerHTML = "";
-  const sc = ctxScope();
-  const curDef = CONTEXTS.find(([k]) => k === S.context);
-  if (curDef && curDef[3] !== "any" && sc !== "any" && curDef[3] !== sc) S.context = "";
-  for (const [k, label, blurb, scope] of CONTEXTS) {
-    const b = h("button", "chip" + (S.context === k ? " on" : ""), esc(label));
-    const ok = scope === "any" || sc === "any" || scope === sc;
-    b.disabled = !ok;
-    b.onclick = () => { S.context = k; renderChips(); if (S.prediction) predictNow(); };
-    box.appendChild(b);
-  }
-  const cur = CONTEXTS.find(([k]) => k === S.context) || CONTEXTS[0];
-  let extra = "";
-  if (sc === "club") extra = " Tournament stages are greyed out because these are clubs.";
-  if (sc === "intl") extra = " Derby is greyed out because these are national teams.";
-  $("#ctxnote").textContent = cur[2] + extra;
-}
-renderChips();
-
 /* ---- team pickers ---- */
 function wireSlot(id, key) {
   const slot = $(id), input = $("input", slot), dd = $(".dd", slot),
@@ -156,7 +136,7 @@ function wireSlot(id, key) {
   let timer;
   input.addEventListener("input", () => {
     S[key] = null; slot.classList.remove("filled"); badge.hidden = true;
-    meta.textContent = ""; updateGo(); renderChips();
+    meta.textContent = ""; updateGo();
     clearTimeout(timer);
     const q = input.value.trim();
     if (q.length < 2) { dd.hidden = true; return; }
@@ -170,24 +150,33 @@ function wireSlot(id, key) {
           dd.appendChild(b);
         });
         dd.hidden = opts.length === 0;
-      } catch { dd.hidden = true; }
+      } catch {
+        if (!S.meta) {
+          dd.innerHTML = `<button disabled><div class="l">The server is still waking up…</div><div class="s">search again in a few seconds</div></button>`;
+          dd.hidden = false;
+        } else dd.hidden = true;
+      }
     }, 220);
   });
   document.addEventListener("click", (e) => { if (!slot.contains(e.target)) dd.hidden = true; });
 }
 const logoWaits = {};
-function pickTeam(key, t) {
+function pickTeam(key, t, keepNeutral) {
   S[key] = t;
   const slot = $(key === "home" ? "#slot-home" : "#slot-away");
   $("input", slot).value = t.name;
   $(".dd", slot).hidden = true;
   slot.classList.add("filled");
   $(".meta", slot).textContent = (t.league || "") + (isFinite(t.elo) ? ` · elo ${Math.round(t.elo)}` : "");
-  updateGo(); renderChips(); sweepLabel();
-  if (S.home && S.away)   // real home fixture unless it's country vs country
+  const oldBadge = $("img.badge", slot);
+  if (t.badge) { oldBadge.src = t.badge; oldBadge.hidden = false; }
+  else oldBadge.hidden = true;      // never leave the previous team's crest up
+  updateGo(); sweepLabel(); updateSwap();
+  if (S.home && S.away && !keepNeutral)   // real home fixture unless country vs country
     $("#neutral").checked = S.home.scope === "intl" && S.away.scope === "intl";
   logoWaits[key] = api("/api/logo", { team_id: t.id }).then(info => {
     Object.assign(t, info);
+    if (S[key] !== t) return;       // user re-picked while this was in flight
     const img = $("img.badge", slot);
     if (info.badge) { img.src = info.badge; img.hidden = false; }
   }).catch(() => {});
@@ -208,8 +197,17 @@ function pickTeam(key, t) {
   }).catch(() => {});
 }
 const updateGo = () => { $("#go").disabled = !(S.home && S.away); };
+const updateSwap = () => { const b = $("#swap"); if (b) b.disabled = !(S.home && S.away); };
 wireSlot("#slot-home", "home"); wireSlot("#slot-away", "away");
 $("#go").onclick = () => predictNow();
+$("#swap").onclick = () => {
+  if (!S.home || !S.away) return;
+  const keepNeutral = $("#neutral").checked;
+  const a = S.home, b = S.away;
+  pickTeam("home", b, true); pickTeam("away", a, true);
+  $("#neutral").checked = keepNeutral;   // switching venue roles, not the venue type
+  if (S.prediction) predictNow();
+};
 
 /* ---- fixtures rail ---- */
 async function loadFixtures() {
@@ -221,8 +219,13 @@ async function loadFixtures() {
     if (!d.fixtures.length) { box.append(h("div", "mini", "No confirmed fixtures in the feed right now — between rounds this list can be empty.")); return; }
     d.fixtures.forEach(f => {
       const ko = new Date(f.kickoff);
-      const when = ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
-        + " · " + f.kickoff.slice(11, 16) + " UK";
+      // offset-carrying kickoffs render in the VIEWER's local time; a bare
+      // string (older payloads) falls back to the raw UK clock time
+      const hasOffset = /[+-]\d\d:\d\d$|Z$/.test(f.kickoff);
+      const when = (f.kicked_off ? "in play · " : "")
+        + ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+        + " · " + (hasOffset ? ko.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                             : f.kickoff.slice(11, 16) + " UK");
       const card = h("div", "fx",
         `<div class="lg">${esc(f.league)}</div>
          <div class="teams">${esc(f.home)} <span style="color:var(--muted)">v</span> ${esc(f.away)}</div>
@@ -250,8 +253,9 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) load
 /* ---- prediction flow ---- */
 async function predictNow() {
   const out = $("#results");
-  out.innerHTML = LOADER(`replaying ${S.meta ? S.meta.matches.toLocaleString() : "154,000"} matches of history…`);
-  const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked, context: S.context };
+  const rid = ++S.run;   // only the latest request may render
+  out.innerHTML = LOADER(`replaying ${S.meta ? S.meta.matches.toLocaleString() : "every stored"} match${S.meta ? "es" : ""} of history…`);
+  const params = { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked };
   try {
     await Promise.allSettled([logoWaits.home, logoWaits.away]);
     const [p, hh, lu] = await Promise.all([
@@ -259,9 +263,11 @@ async function predictNow() {
       api("/api/h2h", { home: S.home.id, away: S.away.id }).catch(() => null),
       api("/api/lineup", { home: S.home.id, away: S.away.id, neutral: params.neutral }).catch(() => null),
     ]);
+    if (rid !== S.run) return;
     S.prediction = p;
     renderPrediction(out, p, hh, lu);
   } catch (e) {
+    if (rid !== S.run) return;
     out.innerHTML = `<div class="err">${esc(e.message)}. If the server was asleep, give it a minute and try again.</div>`;
   }
 }
@@ -272,20 +278,20 @@ function heroHTML(p) {
   const likelier = m.home >= m.away ? S.home : S.away;
   const art = likelier?.fanart || S.home?.fanart || S.away?.fanart;
   const lightKit = hexRgb(kh) && hexRgb(ka) && (lum(hexRgb(kh)) > .75 || lum(hexRgb(ka)) > .75);
-  const ctx = p.context_applied;
+  const neutral = $("#neutral").checked;
+  const sideTag = (label) => `<div class="sidetag">${neutral ? "neutral venue" : label}</div>`;
   return `<div class="hero">
     ${art ? `<img class="bgimg" src="${esc(art)}"><div class="shade"></div>` : ""}
     <div class="inner">
-      ${ctx && ctx.applied ? `<span class="ctxbadge">${esc((CONTEXTS.find(([k]) => k === ctx.context) || ["","match type"])[1])}: goals ${ctx.goals_multiplier >= 1 ? "up" : "down"} ${Math.abs((ctx.goals_multiplier - 1) * 100).toFixed(0)}% — already in these numbers</span>` : ""}
       <div class="cols">
         <div>${S.home?.badge ? `<img class="badge" src="${esc(S.home.badge)}">` : ""}
-          <div class="team">${esc(p.home.name)}</div>
+          <div class="team">${esc(p.home.name)}</div>${sideTag("home")}
           <div class="pct count" style="color:${kh}">${pct(m.home)}</div>
           <div class="fair">fair ${odds(m.fair_odds.home)}</div></div>
-        <div><div class="drawlbl">DRAW</div><div class="draw count">${pct(m.draw, 0)}</div>
+        <div><div class="drawlbl">DRAW</div><div class="draw count">${pct(m.draw)}</div>
           <div class="fair">fair ${odds(m.fair_odds.draw)}</div></div>
         <div>${S.away?.badge ? `<img class="badge" src="${esc(S.away.badge)}">` : ""}
-          <div class="team">${esc(p.away.name)}</div>
+          <div class="team">${esc(p.away.name)}</div>${sideTag("away")}
           <div class="pct count" style="color:${ka}">${pct(m.away)}</div>
           <div class="fair">fair ${odds(m.fair_odds.away)}</div></div>
       </div>
@@ -297,7 +303,7 @@ function heroHTML(p) {
       ${S.home?.stadium && !$("#neutral").checked ? `<div class="venue">${ICONS.pin} ${esc(S.home.stadium)}${S.home.capacity ? ` · ${Number(S.home.capacity).toLocaleString()} seats` : ""}</div>` : ""}
       <div class="tiles">
         <div class="tile"><b>${Number(p.expected_goals.home).toFixed(1)}–${Number(p.expected_goals.away).toFixed(1)}</b><span>expected goals</span></div>
-        <div class="tile" title="${esc(p.elo_note || "")}"><b style="color:#5CE690">${(() => { const d = (p.home.elo_effective != null && p.away.elo_effective != null) ? p.home.elo_effective - p.away.elo_effective : p.model_detail.elo_diff; return (d > 0 ? "+" : "") + Math.round(d); })()}</b><span>elo edge, today's squads</span></div>
+        <div class="tile" title="${esc(p.elo_note || "")}">${(() => { const eff = p.home.elo_effective != null && p.away.elo_effective != null; const d = eff ? p.home.elo_effective - p.away.elo_effective : p.model_detail.elo_diff; return `<b style="color:#5CE690">${(d > 0 ? "+" : "") + Math.round(d)}</b><span>${eff ? "elo edge, today's squads" : "elo edge"}</span>`; })()}</div>
         <div class="tile"><b style="color:#FFD27A">${(100 - Math.max(m.home, m.draw, m.away) * 100).toFixed(0)}%</b><span>misses anyway</span></div>
       </div>
       <button class="mathbtn" id="mathbtn">${ICONS.divide} The math, with this match's numbers</button>
@@ -405,7 +411,7 @@ function renderPrediction(out, p, hh, lu) {
       <div class="card"><h3 class="sec">${ICONS.list} Every market, our fair price</h3>
         ${mkRows.map(([label, prob]) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
           <div class="hbar"><div style="width:${prob*100}%;background:var(--blue)"></div></div>
-          <span class="val">${pct(prob, 0)} <span style="color:var(--blue)">${odds(1/prob)}</span></span></div>`).join("")}
+          <span class="val">${pct(prob)} <span style="color:var(--blue)">${odds(1/prob)}</span></span></div>`).join("")}
         <div class="mini">bet any of these only when a book offers MORE than the fair price</div></div>
       <div class="card">${scorers || `<div class="mini">No player scoring data for these teams.</div>`}</div>
     </div>
@@ -433,7 +439,6 @@ function openMath(p) {
   const favName = m.home >= m.away ? p.home.name : p.away.name;
   const favProb = Math.max(m.home, m.away);
   const live = S.meta?.live_eval;
-  const ctx = p.context_applied;
   const absences = (p.caveats || []).filter(c => /OUT|unavailable/.test(c));
   const ov = h("div", "overlay");
   ov.innerHTML = `<div class="modal">
@@ -442,13 +447,13 @@ function openMath(p) {
     <div class="mini" style="margin-top:0">${esc(p.home.name)} v ${esc(p.away.name)}, in plain words with this match's real values.</div>
 
     <div class="step">${ICONS.bar} Step 1 · How strong is each team?</div>
-    <p>Every team carries a strength rating that rises when it beats good opponents and falls when it loses to weak ones, built from ${S.meta ? S.meta.matches.toLocaleString() : "154,000"} matches with recent games counting most. The rating is not a one-off number: it re-learns from every new result at each data refresh, and today's effective rating additionally discounts players who are missing right now${p.home.elo_delta || p.away.elo_delta ? ` (here: ${esc(p.home.name)} ${p.home.elo} → ${p.home.elo_effective}, ${esc(p.away.name)} ${p.away.elo} → ${p.away.elo_effective})` : ""}. Here the gap is <b class="k">${gap} points in favor of ${esc(stronger)}</b>. Gaps like that historically mean the stronger side gets the better of the matchup about <b class="k">${gapWin}%</b> of the time before anything else is considered.</p>
+    <p>Every team carries a strength rating that rises when it beats good opponents and falls when it loses to weak ones, built from ${S.meta ? S.meta.matches.toLocaleString() : "our full history of"} matches with recent games counting most. The rating is not a one-off number: it re-learns from every new result at each data refresh, and today's effective rating additionally discounts players who are missing right now${p.home.elo_delta || p.away.elo_delta ? ` (here: ${esc(p.home.name)} ${p.home.elo} → ${p.home.elo_effective}, ${esc(p.away.name)} ${p.away.elo} → ${p.away.elo_effective})` : ""}. Here the gap is <b class="k">${gap} points in favor of ${esc(stronger)}</b>. Gaps like that historically mean the stronger side gets the better of the matchup about <b class="k">${gapWin}%</b> of the time before anything else is considered.</p>
 
     <div class="step">${ICONS.users} Step 2 · Who can actually play?</div>
     <p>Before any goals are estimated, we assemble each side's probable players from the official squad lists, then remove anyone the league's availability flags or the day's team news say is out or doubtful. A missing player takes his usual share of his team's goals with him. ${absences.length ? "For this match that mattered: " + esc(absences.map(a => a.split(":")[0].replace("Adjusted for ", "").replace("Team news suggests ", "")).join("; ")) + "." : "For this match, nobody relevant is flagged as missing right now."}</p>
 
     <div class="step">${ICONS.target} Step 3 · How many goals do we expect?</div>
-    <p>Scoring is estimated two independent ways: from <b class="k">recent play</b> (what each team actually scored and conceded lately, weighted by chance quality where shot data exists), which says ${md.dc[0]} to ${md.dc[1]}, and from the <b class="k">rating gap</b> in step 1, which says ${md.elo[0]} to ${md.elo[1]}. ${agree ? "The two views broadly agree here, which makes this prediction more trustworthy than average." : "The two views disagree somewhat here, which makes this prediction a little less certain than average."} Combined (trusting the ratings view more; that weighting was fitted on 14,000 past matches), we land on <b class="k">${lH} goals for ${esc(p.home.name)}</b> and <b class="k">${lA} for ${esc(p.away.name)}</b>.${ctx && ctx.applied ? ` Because you marked this a ${esc(ctx.context.replace("_", " "))} match, the goal expectation was scaled ×${ctx.goals_multiplier}, the way such games historically play out.` : ""}</p>
+    <p>Scoring is estimated two independent ways: from <b class="k">recent play</b> (what each team actually scored and conceded lately, weighted by chance quality where shot data exists), which says ${md.dc[0]} to ${md.dc[1]}, and from the <b class="k">rating gap</b> in step 1, which says ${md.elo[0]} to ${md.elo[1]}. ${agree ? "The two views broadly agree here, which makes this prediction more trustworthy than average." : "The two views disagree somewhat here, which makes this prediction a little less certain than average."} Combined (trusting the ratings view more; that weighting was fitted on 10,000 past matches), we land on <b class="k">${lH} goals for ${esc(p.home.name)}</b> and <b class="k">${lA} for ${esc(p.away.name)}</b>.</p>
 
     <div class="step">${ICONS.grid} Step 4 · From goals to chances</div>
     <p>A team expected to score ${lH} can easily score 0 or 3, so we play the match out across every possible scoreline. That math makes the single most likely score <b class="k">${esc(top.score)} at ${pct(top.prob)}</b>, and 0-0 about ${pct(p00)}. Adding every scoreline where ${esc(p.home.name)} finishes ahead gives their <b class="k">${pct(m.home)}</b>; draws add to ${pct(m.draw)}; ${esc(p.away.name)} gets ${pct(m.away)}. Every number in the app comes from this same set of scorelines, so nothing contradicts anything.</p>
@@ -471,18 +476,25 @@ function sweepLabel() {
     ? `Grade ${S.home.name} v ${S.away.name}` : "Scan the next two days";
 }
 $("#sweep").onclick = async () => {
-  const out = $("#marketout");
+  const btn = $("#sweep"), out = $("#marketout");
+  btn.disabled = true;   // each click spends real odds credits; no double-fires
   out.innerHTML = LOADER("shopping 15 sportsbooks for prices…");
   try {
     const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
     const d = await api("/api/bestbets", params);
-    if (d.error) { out.innerHTML = `<div class="err">${esc(d.detail || d.error)}</div>`; return; }
+    if (d.error) {
+      const msg = d.error === "quota"
+        ? "The odds allowance for this month is used up; it resets on the 1st."
+        : (d.detail || d.error);
+      out.innerHTML = `<div class="err">${esc(msg)}</div>`; return;
+    }
     const rows = d.selected?.bets || d.bets || [];
     out.innerHTML = "";
     if (!rows.length) {
       out.append(h("div", "card", `<h3 class="sec">${ICONS.bar} Nothing to grade right now</h3><div class="sub" style="margin:0">${
-        d.fixtures === 0 ? "The books aren't listing football in the next two days. This happens between rounds; check back on a match week."
-        : `Checked ${d.fixtures} listed games. No price beats the combined estimate right now, which is the normal state. Not betting today costs you nothing.`}</div>`));
+        params ? "The books aren't listing this match yet, so there's nothing to grade. Prices usually appear a day or two before kickoff."
+        : d.fixtures === 0 ? "The books aren't listing football in the next two days. This happens between rounds; check back on a match week."
+        : `Checked ${d.fixtures} listed game${d.fixtures === 1 ? "" : "s"}. No price beats the combined estimate right now, which is the normal state. Not betting today costs you nothing.`}</div>`));
       return;
     }
     const grid = h("div", "duo");
@@ -501,6 +513,7 @@ $("#sweep").onclick = async () => {
     if (d.remaining_credits != null)
       out.append(h("div", "mini", `odds credits left: ${d.remaining_credits} · edges are long-run advantages, not sure things`));
   } catch (e) { out.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
+  finally { btn.disabled = false; }
 };
 
 /* ---- parlays ---- */
@@ -510,7 +523,13 @@ async function loadParlays() {
   out.innerHTML = LOADER("simulating this match 150,000 times…");
   try {
     const list = await api("/api/parlay/suggest", { home: S.home.id, away: S.away.id,
-      neutral: $("#neutral").checked, context: S.context });
+      neutral: $("#neutral").checked });
+    if (!list.length) {
+      out.innerHTML = "";
+      out.append(h("div", "card", `<h3 class="sec">${ICONS.divide} No parlay clears the bar</h3>
+        <div class="sub" style="margin:0">Every combination for this match either lands under a 1.5% real chance or has no fair price worth quoting. Skipping is the right call here.</div>`));
+      return;
+    }
     const grid = h("div", "duo"); out.innerHTML = ""; out.append(grid);
     list.forEach(pl => grid.append(h("div", "card", `
       <div style="color:var(--green-deep);font-weight:800;font-size:12.5px;margin-bottom:6px">${esc(pl.name)}${pl.n_legs >= 4 ? " · Boost eligible" : ""}</div>
@@ -544,7 +563,7 @@ function renderFPL(out) {
   if (!t) {
     out.innerHTML = `<div class="grid2"><div class="card mini">The model team is unavailable right now; it retries when you come back to this tab.</div>
       <div class="card" style="max-height:900px;overflow:auto"><h3 class="sec">Top projected players</h3>
-      ${gw.players.slice(0, 40).map(p => `<div class="mini" style="padding:6px 0;border-bottom:1px solid var(--panel2)"><b>${esc(p.name)}</b> ${esc(p.pos)} · ${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)} · £${p.price}m · ${p.xpts.toFixed(1)} xPts</div>`).join("")}</div></div>`;
+      ${gw.players.slice(0, 40).map(p => `<div class="mini" style="padding:6px 0;border-bottom:1px solid var(--panel2)"><b>${esc(p.name)}</b> ${esc(p.pos)} · ${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)} · £${p.price.toFixed(1)}m · ${p.xpts.toFixed(1)} xPts</div>`).join("")}</div></div>`;
     return;
   }
   const byId = Object.fromEntries(t.squad.map(p => [p.id, p]));
@@ -570,7 +589,7 @@ function renderFPL(out) {
     ${list.map(p => `<tr><td>${p.photo ? `<img class="face-s" src="${esc(p.photo)}" onerror="this.remove()">` : ""}</td>
       <td><b>${esc(p.name)}</b> <span class="mini">${esc(p.pos)}</span></td>
       <td class="mini">${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)}</td>
-      <td class="num">£${p.price}m</td>
+      <td class="num">£${p.price.toFixed(1)}m</td>
       <td class="num"><span class="pill" style="background:${rateColor(p.xpts, 5, 3)}">${p.xpts.toFixed(1)}</span></td></tr>`).join("")}</table>`;
 
   out.innerHTML = `<div class="grid2">
@@ -595,7 +614,7 @@ function renderFPL(out) {
         </svg>${dots}
       </div>
       <div class="bench"><span class="mini" style="margin-top:0">bench</span>
-        ${bench.map(p => `<div class="bp">${p.photo ? `<img src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price}m</div></div>`).join("")}</div>
+        ${bench.map(p => `<div class="bp">${p.photo ? `<img src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price.toFixed(1)}m</div></div>`).join("")}</div>
       ${t.scores.length ? `<div class="mini" style="margin-top:8px">Finished rounds: ${t.scores.map(s => `GW${s.gw}: <b>${s.points}</b>`).join(" · ")}</div>` : ""}
       <div class="mini" style="margin-top:8px">${esc(t.note)}${t.durable ? "" : " (Warning: durable storage is not connected on this server, so history resets on restart.)"}</div>
     </div>

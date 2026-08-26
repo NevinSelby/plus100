@@ -80,7 +80,8 @@ ODDSAPI_ALIASES = {
 def resolve_team(store: Store, name: str, scope: str) -> str | None:
     k = norm_key(name)
     if k in ODDSAPI_ALIASES:
-        return ODDSAPI_ALIASES[k]
+        tid = ODDSAPI_ALIASES[k]
+        return tid if tid in store.registry else None
     suffix = "@intl" if scope == "intl" else ""
     pool = {tid: norm_key(r["name"]) for tid, r in store.registry.items()
             if r["scope"] == scope and r["active"]}
@@ -102,27 +103,6 @@ def resolve_team(store: Store, name: str, scope: str) -> str | None:
     if suffix and (slugged := name.lower().replace(" ", "-") + suffix) in store.registry:
         return slugged
     return None
-
-
-def _devig_consensus(bookmakers: list, outcome_names: list[str]) -> dict | None:
-    """Median de-vigged probability per outcome across all books pricing it."""
-    per_outcome: dict[str, list[float]] = {n: [] for n in outcome_names}
-    for bk in bookmakers:
-        for mkt in bk.get("markets", []):
-            if mkt["key"] != "h2h":
-                continue
-            prices = {oc["name"]: float(oc["price"]) for oc in mkt.get("outcomes", [])}
-            if set(prices) != set(outcome_names):
-                continue
-            inv = {n: 1 / p for n, p in prices.items()}
-            s = sum(inv.values())
-            for n in outcome_names:
-                per_outcome[n].append(inv[n] / s)
-    if any(not v for v in per_outcome.values()):
-        return None
-    med = {n: statistics.median(v) for n, v in per_outcome.items()}
-    s = sum(med.values())
-    return {n: v / s for n, v in med.items()}
 
 
 def _is_half_line(x) -> bool:
@@ -349,7 +329,11 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
 
     bets.sort(key=lambda b: -b["edge_pct"])
     selected = None
-    positive = [b for b in bets if b["edge_pct"] > 1.0]
+    # basic proportional de-vigging overstates longshot probability (books load
+    # extra margin there), so long-priced outcomes must clear a higher bar
+    # before being called value
+    positive = [b for b in bets
+                if b["edge_pct"] > (2.5 if b["p_blend"] < 0.25 else 1.0)]
 
     # cross-match parlays: best 2- and 3-leg combos of positive-edge legs,
     # one leg per match (independent events -> probabilities multiply)

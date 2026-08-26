@@ -189,6 +189,15 @@ _DEPARTURE_PATTERNS = [re.compile(rx) for rx in (
     r"\bsigns? for\b", r"\bsold to\b", r"\bcompletes? (?:a )?(?:move|transfer)\b",
     r"\btransfer agreed\b", r"\bdeparts\b", r"\b(?:leaves|left) the club\b",
     r"\bloan move to\b")]
+# headlines that mean the OPPOSITE of an absence: "Wood returns from injury",
+# "no doubt over Saka", "Isak back in training after injury scare" — any of
+# these vetoes the whole title so good news never flags a player out
+_RECOVERY_PATTERNS = [re.compile(rx) for rx in (
+    r"\breturn(?:s|ed|ing)?\b", r"\bback in\b", r"\bback from\b",
+    r"\bfit\b", r"\bfitness boost\b", r"\bboost\b", r"\bno doubts?\b",
+    r"\bavailable\b", r"\brecover(?:s|ed|ing|y)?\b", r"\bin contention\b",
+    r"\bshakes? off\b", r"\bpasses? fit\b", r"\bwins? .{0,20}race\b",
+    r"\bnew (?:deal|contract)\b", r"\bcontract extension\b", r"\bextends?\b")]
 
 
 def _fold(s: str) -> str:
@@ -198,7 +207,8 @@ def _fold(s: str) -> str:
                   .encode("ascii", "ignore").decode().lower())
 
 
-def _news_scan(tid: str, names: list[str], patterns: list) -> list[str]:
+def _news_scan(tid: str, names: list[str], patterns: list,
+               vetoes: list | None = None) -> list[str]:
     try:
         items = news(tid)["items"]
     except Exception:  # noqa: BLE001
@@ -214,7 +224,11 @@ def _news_scan(tid: str, names: list[str], patterns: list) -> list[str]:
         name_rx = re.compile(r"\b" + re.escape(last) + r"\b")
         for it in items:
             title = _fold(it.get("title") or "")
-            if name_rx.search(title) and any(p.search(title) for p in patterns):
+            if not name_rx.search(title):
+                continue
+            if vetoes and any(v.search(title) for v in vetoes):
+                continue
+            if any(p.search(title) for p in patterns):
                 hits.append(n)
                 break
     return hits
@@ -222,9 +236,16 @@ def _news_scan(tid: str, names: list[str], patterns: list) -> list[str]:
 
 def _news_absences(tid: str, names: list[str]) -> list[str]:
     """Players from `names` the news says are injured/suspended OR have left the
-    club — either way they should not appear in a line-up or count toward goals."""
-    outs = _news_scan(tid, names, _ABSENCE_PATTERNS)
-    for n in _news_scan(tid, names, _DEPARTURE_PATTERNS):
+    club — either way they should not appear in a line-up or count toward goals.
+    Good-news headlines veto a hit; a transfer TO this club is an arrival, not a
+    departure, so the club's own name after "to/joins" vetoes the departure side."""
+    outs = _news_scan(tid, names, _ABSENCE_PATTERNS, _RECOVERY_PATTERNS)
+    dep_veto = list(_RECOVERY_PATTERNS)
+    team = _fold(store.registry.get(tid, {}).get("name", "")).strip()
+    if len(team) >= 4:
+        dep_veto.append(re.compile(
+            r"\b(?:to|joins?|joining|for)\s+" + re.escape(team) + r"\b"))
+    for n in _news_scan(tid, names, _DEPARTURE_PATTERNS, dep_veto):
         if n not in outs:
             outs.append(n)
     return outs
@@ -255,7 +276,10 @@ def _auto_absences(tid: str) -> list[str]:
         sg = store.scorer_goals
         names = list(sg[sg.team == reg.get("name", "")].sort_values(
             "wgoals", ascending=False).scorer.head(10))
-    outs = _news_absences(tid, names)
+    # headlines are a noisy source, so cap them at the three most important
+    # players; the official FPL availability flags below are authoritative
+    # and are never capped
+    outs = _news_absences(tid, names)[:3]
     if reg.get("scope") == "club":
         try:
             from .fpl import club_unavailable
@@ -350,13 +374,25 @@ class ParlayReq(BaseModel):
     context: str = "none"
 
 
+def _outs_for_pair(home: str, away: str) -> tuple[list, list]:
+    """Best-effort auto absences; never blocks the endpoint."""
+    try:
+        return _auto_absences(home), _auto_absences(away)
+    except Exception:  # noqa: BLE001
+        return [], []
+
+
 @app.get("/api/parlay/suggest")
 def parlay_suggest(home: str, away: str, neutral: bool = False, context: str = "none"):
     _require_store()
     from .model import suggest_parlays
     _team_or_404(home)
     _team_or_404(away)
-    return suggest_parlays(store, home, away, neutral, context=context)
+    if home == away:
+        raise HTTPException(400, "pick two different teams")
+    oh, oa = _outs_for_pair(home, away)
+    return suggest_parlays(store, home, away, neutral, context=context,
+                           out_home=oh, out_away=oa)
 
 
 @app.post("/api/parlay")
@@ -365,10 +401,14 @@ def parlay_endpoint(req: ParlayReq):
     from .model import simulate_sgp
     _team_or_404(req.home)
     _team_or_404(req.away)
+    if req.home == req.away:
+        raise HTTPException(400, "pick two different teams")
     if not req.legs:
         raise HTTPException(400, "no legs given")
+    oh, oa = _outs_for_pair(req.home, req.away)
     try:
-        r = simulate_sgp(store, req.home, req.away, req.legs, req.neutral, req.context)
+        r = simulate_sgp(store, req.home, req.away, req.legs, req.neutral, req.context,
+                         out_home=oh, out_away=oa)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if req.price and req.price > 1:
@@ -399,7 +439,7 @@ def news(team_id: str):
     now = time.time()
     if key in _news_cache and now - _news_cache[key][0] < 1800:
         return {"team": key, "items": _news_cache[key][1]}
-    items = []
+    items, fetch_failed = [], False
     try:
         q = f'"{key}" football (injury OR "team news" OR lineup)'
         r = requests.get("https://news.google.com/rss/search",
@@ -415,8 +455,9 @@ def news(team_id: str):
                 "source": src.text if src is not None else "",
             })
     except Exception:  # noqa: BLE001
-        pass
-    _news_cache[key] = (now, items)
+        fetch_failed = True
+    if not (fetch_failed and not items):    # a failed fetch shouldn't blank the
+        _news_cache[key] = (now, items)     # team's news for the next 30 minutes
     return {"team": key, "items": items,
             "disclaimer": "Headlines are context only; they are not part of the statistical model."}
 
@@ -765,6 +806,8 @@ def lineup(home: str, away: str, neutral: bool = False):
     """Probable line-ups for a matchup: public squad data (TheSportsDB) ranked by
     our model's scoring shares. These are LIKELY players, not confirmed team sheets."""
     _require_store()
+    _team_or_404(home)
+    _team_or_404(away)
     eg = expected_goals(store, home, away, neutral=neutral)
     h = _team_lineup(home, eg["lambda_home"])
     a = _team_lineup(away, eg["lambda_away"])
@@ -907,7 +950,10 @@ def fpl_model_squad():
     """The persistent model team: obeys real FPL rules, tracks its real score."""
     _require_store()
     from .fpl import model_squad
-    return model_squad(store)
+    try:
+        return model_squad(store)
+    except Exception as e:  # noqa: BLE001
+        return {"error": "fpl_unavailable", "detail": str(e)[:200]}
 
 
 @app.get("/api/fpl/gw")
@@ -915,7 +961,11 @@ def fpl_gameweek():
     _require_store()
     from .fpl import next_gameweek
     try:
-        return next_gameweek(store)
+        d = next_gameweek(store)
+        # internal plumbing for the squad engines; not part of the public payload
+        d.pop("xp_all", None)
+        d.pop("teams_with_fixture", None)
+        return d
     except Exception as e:  # noqa: BLE001
         return {"error": "fpl_unavailable", "detail": str(e)[:200]}
 
@@ -962,7 +1012,12 @@ def meta():
                     "the market (optimum 1.0), but 0.75 costs only +0.0008 Brier, within noise. "
                     "0.75 is the maximum model weight the data defends.",
         },
-        "live_eval": store.live_eval,
+        "live_eval": ({**store.live_eval,
+                       "note": "Rolling window check of the Elo-driven core — the component "
+                               "that decides match winners — against actual results and the "
+                               "books' closing odds. The full blend layers xG on top for "
+                               "totals and scorelines."}
+                      if store.live_eval else None),
         "context_scales": {k: v for k, v in store.context_scales.items()},
         "refresh": {
             "auto": f"every {REFRESH_HOURS} hours",
@@ -1138,14 +1193,27 @@ class AdminLogin(BaseModel):
     password: str
 
 
+# brute-force throttle: after 5 straight failures the login sleeps for 15
+# minutes. Global (there is exactly one admin), in-memory (resets on restart —
+# fine, the free host restarts often and the window only needs to slow a bot).
+_login_guard = {"fails": 0, "until": 0.0}
+
+
 @app.post("/api/admin/login")
 def admin_login(body: AdminLogin):
     ap = _admin_pass()
     if not ap:
         raise HTTPException(503, "Admin is not configured on this server "
                                  "(PLUS100_ADMIN_PASS is unset).")
+    if time.time() < _login_guard["until"]:
+        raise HTTPException(429, "Too many attempts. Try again in a few minutes.")
     if body.username != ADMIN_USER or not hmac.compare_digest(body.password, ap):
+        _login_guard["fails"] += 1
+        if _login_guard["fails"] >= 5:
+            _login_guard["until"] = time.time() + 900
+            _login_guard["fails"] = 0
         raise HTTPException(401, "Wrong username or password.")
+    _login_guard["fails"] = 0
     return {"token": _admin_token()}
 
 
@@ -1216,9 +1284,13 @@ _DIV_RANK = {"E0": 0, "SP1": 1, "I1": 2, "D1": 3, "F1": 4, "N1": 5, "P1": 6,
 @app.get("/api/fixtures/upcoming")
 def upcoming_fixtures(days: int = 7, limit: int = 40):
     """Real upcoming matches from football-data.co.uk — the same feed our match
-    history comes from, so every team name maps straight onto the model."""
+    history comes from, so every team name maps straight onto the model.
+    Kick-offs are ISO-8601 WITH a UTC offset (UK wall time), so clients can show
+    the viewer's local time with a plain Date parse; the first 16 characters
+    still read as UK time for older clients that slice the string."""
     _require_store()
     days = max(1, min(days, 14))
+    limit = max(1, min(limit, 60))
     key = f"up:{days}:{limit}"
     hit = _fixtures_cache.get(key)
     if hit and time.time() - hit[0] < _FIXTURES_TTL:
@@ -1227,6 +1299,23 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
     import csv
     import io as _io
     from datetime import datetime, timedelta
+
+    try:
+        from zoneinfo import ZoneInfo
+        _uk = ZoneInfo("Europe/London")
+    except Exception:  # noqa: BLE001
+        _uk = None
+
+    def _iso_uk(naive_london: datetime) -> str:
+        if _uk is not None:
+            return naive_london.replace(tzinfo=_uk).isoformat(timespec="minutes")
+        return naive_london.strftime("%Y-%m-%dT%H:%M")
+
+    def _utc_to_london(naive_utc: datetime) -> datetime:
+        if _uk is not None:
+            from datetime import timezone as _tz
+            return naive_utc.replace(tzinfo=_tz.utc).astimezone(_uk).replace(tzinfo=None)
+        return naive_utc
 
     try:
         r = requests.get("https://www.football-data.co.uk/fixtures.csv",
@@ -1240,13 +1329,27 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                if reg["scope"] == "club"}
     from .data_store import LEAGUE_NAMES
 
-    try:
-        from zoneinfo import ZoneInfo
-        now = datetime.now(ZoneInfo("Europe/London")).replace(tzinfo=None)
-    except Exception:  # noqa: BLE001
-        now = datetime.utcnow()
+    now = (datetime.now(_uk).replace(tzinfo=None) if _uk is not None
+           else datetime.utcnow())
     horizon = now + timedelta(days=days)
     out = []
+    seen: set[tuple] = set()   # (home_id, away_id): a rescheduled match shows once
+
+    def _push(hid, aid, ko_london, league, country, odds, rank):
+        if (hid, aid) in seen:
+            return
+        seen.add((hid, aid))
+        out.append({
+            "home_id": hid, "away_id": aid,
+            "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
+            "home_elo": store.registry[hid]["elo_global"],
+            "away_elo": store.registry[aid]["elo_global"],
+            "league": league, "country": country,
+            "kickoff": _iso_uk(ko_london),
+            "kicked_off": ko_london <= now,
+            "odds": odds, "rank": rank,
+        })
+
     for row in csv.DictReader(_io.StringIO(text)):
         div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
         if not div or not hn or not an:
@@ -1267,22 +1370,16 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     "away": float(row["AvgA"])}
         except (TypeError, ValueError, KeyError):
             odds = None
-        out.append({
-            "home_id": hid, "away_id": aid,
-            "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
-            "home_elo": store.registry[hid]["elo_global"],
-            "away_elo": store.registry[aid]["elo_global"],
-            "league": league, "country": country,
-            "kickoff": ko.strftime("%Y-%m-%dT%H:%M"),
-            "odds": odds,
-            "rank": _DIV_RANK.get(div, 20),
-        })
-    note = ("Confirmed fixtures from the leagues this model is built on. "
-            "Kick-off times are UK time.")
-    if not out:
-        # Between rounds the main feed only holds last weekend's games. The official
-        # Premier League schedule is published for the whole season, so fall back to
-        # it rather than showing an empty rail while a season is running.
+        _push(hid, aid, ko, league, country, odds, _DIV_RANK.get(div, 20))
+
+    primary_n = len(out)
+    have_pl = any(f["league"] == "Premier League" for f in out)
+    note = "Confirmed fixtures from the leagues this model is built on."
+    # Between rounds the main feed goes quiet (sometimes only partially: it can
+    # hold a stray midweek game while missing the whole next PL round). Fall back
+    # to the official Premier League schedule whenever no PL fixture surfaced,
+    # and to the per-league schedule source when the rail is still thin.
+    if not have_pl:
         try:
             from .fpl import BASE as FPL_BASE
             from .fpl import _get as fpl_get
@@ -1293,26 +1390,17 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                 ko = f.get("kickoff_time")
                 if not ko:
                     continue
-                kod = datetime.strptime(ko, "%Y-%m-%dT%H:%M:%SZ")
+                kod = _utc_to_london(datetime.strptime(ko, "%Y-%m-%dT%H:%M:%SZ"))
                 if kod > now + timedelta(days=max(days, 12)):
                     continue
                 th, ta = tmap.get(f["team_h"]), tmap.get(f["team_a"])
                 if not th or not ta or not th["registry_id"] or not ta["registry_id"]:
                     continue
-                hid, aid = th["registry_id"], ta["registry_id"]
-                out.append({
-                    "home_id": hid, "away_id": aid,
-                    "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
-                    "home_elo": store.registry[hid]["elo_global"],
-                    "away_elo": store.registry[aid]["elo_global"],
-                    "league": "Premier League", "country": "England",
-                    "kickoff": kod.strftime("%Y-%m-%dT%H:%M"), "odds": None, "rank": 1,
-                })
-            if out:
-                note = ("The odds feed is between rounds, so this is the confirmed "
-                        "schedule instead. Kick-off times are UK time.")
+                _push(th["registry_id"], ta["registry_id"], kod,
+                      "Premier League", "England", None, 1)
         except Exception:  # noqa: BLE001
             pass
+    if primary_n < 5:
         # other big leagues: the free schedule source lists the next confirmed
         # match per league — thin, but keeps the rail worldwide between rounds
         _TSDB_LEAGUES = [("4335", "La Liga", "Spain"), ("4332", "Serie A", "Italy"),
@@ -1340,23 +1428,19 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     ts = ev.get("strTimestamp")
                     if not ts:
                         continue
-                    kod = datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M")
+                    kod = _utc_to_london(datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M"))
                     if kod < now - timedelta(hours=3) or kod > now + timedelta(days=max(days, 12)):
                         continue
                     hid = _map_club(ev.get("strHomeTeam") or "")
                     aid = _map_club(ev.get("strAwayTeam") or "")
                     if not hid or not aid:
                         continue
-                    out.append({
-                        "home_id": hid, "away_id": aid,
-                        "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
-                        "home_elo": store.registry[hid]["elo_global"],
-                        "away_elo": store.registry[aid]["elo_global"],
-                        "league": lgname, "country": country,
-                        "kickoff": kod.strftime("%Y-%m-%dT%H:%M"), "odds": None, "rank": 2,
-                    })
+                    _push(hid, aid, kod, lgname, country, None, 2)
             except Exception:  # noqa: BLE001
                 continue
+    if len(out) > primary_n:
+        note = ("The odds feed is between rounds, so confirmed league schedules "
+                "fill the gaps.")
     out.sort(key=lambda f: (f["kickoff"], f["rank"]))   # soonest first, all leagues mixed
     payload = {"fixtures": out[:limit], "count": len(out), "note": note}
     _fixtures_cache[key] = (time.time(), payload)
