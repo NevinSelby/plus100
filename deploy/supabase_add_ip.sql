@@ -1,20 +1,7 @@
--- Plus100 analytics: run this ONCE in your Supabase project's SQL editor.
--- Creates the events table and the stats function the admin dashboard reads.
+-- Plus100 analytics: adds visitor IP capture. Run ONCE in the Supabase SQL editor.
+-- Safe to re-run; existing rows simply have a null ip.
 
-create table if not exists usage_events (
-  id bigint generated always as identity primary key,
-  ts timestamptz not null default now(),
-  kind text not null,                  -- 'request' or 'prediction'
-  path text,
-  visitor text,                        -- one-way hash (ip + browser)
-  ip text,                             -- raw client address, for the site owner
-  home text, away text, context text, neutral boolean
-);
-create index if not exists usage_events_ts on usage_events (ts);
-create index if not exists usage_events_kind on usage_events (kind);
-
--- locked down: only the service key (used by the server) can touch it
-alter table usage_events enable row level security;
+alter table usage_events add column if not exists ip text;
 
 create or replace function usage_stats() returns jsonb
 language sql security definer set search_path = public as $$

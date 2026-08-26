@@ -1082,11 +1082,17 @@ def _sb_flusher() -> None:
             continue
         # PostgREST bulk inserts demand identical keys on every row: pad the
         # short "request" rows so they can share a batch with prediction rows
-        cols = ("kind", "path", "visitor", "home", "away", "context", "neutral")
+        cols = ("kind", "path", "visitor", "ip", "home", "away", "context", "neutral")
         batch = [{c: e.get(c) for c in cols} for e in batch]
         try:
             r = requests.post(f"{SB_URL}/rest/v1/usage_events", json=batch,
                               headers=_sb_headers(), timeout=10)
+            if r.status_code == 400:
+                # most likely the ip column migration hasn't been run yet:
+                # keep the analytics flowing without it rather than dropping
+                slim = [{k: v for k, v in e.items() if k != "ip"} for e in batch]
+                r = requests.post(f"{SB_URL}/rest/v1/usage_events", json=slim,
+                                  headers=_sb_headers(), timeout=10)
             if r.status_code >= 500:          # transient server-side: retry once
                 raise RuntimeError(f"supabase {r.status_code}")
         except Exception:  # noqa: BLE001 — re-queue once so a blip loses nothing
@@ -1107,7 +1113,8 @@ def _sb_stats() -> dict | None:
             return None
         d.setdefault("since", time.time())
         d["note"] = ("Stored durably in Supabase; survives every restart and deploy. "
-                     "No third-party trackers; visitors are one-way hashes.")
+                     "No third-party trackers; visitor IP addresses are recorded "
+                     "for the site owner.")
         return d
     except Exception:  # noqa: BLE001
         return None
@@ -1128,11 +1135,16 @@ def _admin_token() -> str | None:
     return hmac.new(ap.encode(), b"plus100-admin-session", hashlib.sha256).hexdigest()
 
 
+def _client_ip(request: Request) -> str:
+    """Real client address: first hop of X-Forwarded-For (set by the host's
+    proxy on Render), falling back to the socket peer when running locally."""
+    return (request.headers.get("x-forwarded-for")
+            or (request.client.host if request.client else "?")).split(",")[0].strip()[:45]
+
+
 def _visitor_id(request: Request) -> str:
-    ip = (request.headers.get("x-forwarded-for")
-          or (request.client.host if request.client else "?")).split(",")[0].strip()
     ua = request.headers.get("user-agent", "")[:80]
-    return hashlib.sha256(f"{ip}|{ua}".encode()).hexdigest()[:12]
+    return hashlib.sha256(f"{_client_ip(request)}|{ua}".encode()).hexdigest()[:12]
 
 
 def _day_bucket(day: str) -> dict:
@@ -1155,11 +1167,14 @@ async def _track_usage(request: Request, call_next):
                 or path in ("/healthz", "/favicon.ico")):
             global _usage_dirty
             vid = _visitor_id(request)
-            _sb_log({"kind": "request", "path": path[:80], "visitor": vid})
+            ip = _client_ip(request)
+            _sb_log({"kind": "request", "path": path[:80], "visitor": vid, "ip": ip})
             with _usage_lock:
                 d = _day_bucket(time.strftime("%Y-%m-%d"))
                 d["requests"] += 1
                 d["visitors"][vid] = d["visitors"].get(vid, 0) + 1
+                v = _usage.setdefault("ips", {}).setdefault(vid, {"ip": ip, "n": 0})
+                v.update(ip=ip, last=int(time.time()), n=v.get("n", 0) + 1)
                 _usage_dirty += 1
                 if _usage_dirty >= 25:
                     _usage_dirty = 0
@@ -1172,7 +1187,7 @@ async def _track_usage(request: Request, call_next):
 def _log_prediction(request: Request, p: dict, context: str, neutral: bool) -> None:
     try:
         _sb_log({"kind": "prediction", "path": "/api/predict",
-                 "visitor": _visitor_id(request),
+                 "visitor": _visitor_id(request), "ip": _client_ip(request),
                  "home": p["home"]["name"], "away": p["away"]["name"],
                  "context": context if context not in ("", "none") else "regular",
                  "neutral": bool(neutral)})
@@ -1182,6 +1197,7 @@ def _log_prediction(request: Request, p: dict, context: str, neutral: bool) -> N
                 "ts": int(time.time()), "home": p["home"]["name"], "away": p["away"]["name"],
                 "context": context if context not in ("", "none") else "regular",
                 "neutral": bool(neutral), "visitor": _visitor_id(request),
+                "ip": _client_ip(request),
             }] + _usage["recent"])[:500]
             _flush_usage()
     except Exception:  # noqa: BLE001
@@ -1241,6 +1257,10 @@ def admin_stats(request: Request):
         for r in _usage["recent"]:
             key = f"{r['home']} v {r['away']}"
             matchups[key] = matchups.get(key, 0) + 1
+        visitors = sorted(
+            ({"visitor": vid, "ip": v.get("ip"), "n": v.get("n", 0),
+              "last": v.get("last")} for vid, v in _usage.get("ips", {}).items()),
+            key=lambda x: -(x["last"] or 0))[:20]
         return {
             "since": _usage["since"],
             "unique_visitors": len(allv),
@@ -1250,9 +1270,11 @@ def admin_stats(request: Request):
             "top_matchups": [{"matchup": k, "n": n} for k, n in
                              sorted(matchups.items(), key=lambda x: -x[1])[:10]],
             "recent": _usage["recent"][:100],
-            "note": ("Counted on the server itself, no third-party trackers. The free "
-                     "host wipes its disk on every deploy or restart, so history "
-                     "starts over at that point."),
+            "visitors": visitors,
+            "note": ("Counted on the server itself, no third-party trackers; visitor "
+                     "IP addresses are recorded for the site owner. The free host "
+                     "wipes its disk on every deploy or restart, so history starts "
+                     "over at that point."),
         }
 
 
