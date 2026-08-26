@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .data_store import get_store, norm_key
+from .data_store import get_store, norm_key, slug
 from .fpl import club_squad as fpl_squad
 from .model import expected_goals, likely_scorers, likely_scorers_club, predict
 
@@ -462,6 +462,82 @@ def news(team_id: str):
             "disclaimer": "Headlines are context only; they are not part of the statistical model."}
 
 
+# football-data short names that TheSportsDB doesn't know under that spelling:
+# search with the club's canonical name instead (keyed by our registry id)
+TSDB_SEARCH_ALIASES = {
+    "sociedad": "Real Sociedad", "betis": "Real Betis", "ath-madrid": "Atletico Madrid",
+    "ath-bilbao": "Athletic Bilbao", "espanol": "Espanyol", "vallecano": "Rayo Vallecano",
+    "celta": "Celta Vigo", "sp-gijon": "Sporting Gijon", "la-coruna": "Deportivo La Coruna",
+    "nott-m-forest": "Nottingham Forest", "sheffield-weds": "Sheffield Wednesday",
+    "qpr": "Queens Park Rangers", "west-brom": "West Bromwich Albion",
+    "wolves": "Wolverhampton Wanderers", "man-united": "Manchester United",
+    "man-city": "Manchester City", "spurs": "Tottenham Hotspur",
+    "ein-frankfurt": "Eintracht Frankfurt", "m-gladbach": "Borussia Monchengladbach",
+    "leverkusen": "Bayer Leverkusen", "dortmund": "Borussia Dortmund",
+    "hertha": "Hertha Berlin", "milan": "AC Milan", "inter": "Inter Milan",
+    "verona": "Hellas Verona", "paris-sg": "Paris Saint Germain",
+    "st-etienne": "Saint-Etienne", "sp-lisbon": "Sporting CP",
+    "sp-braga": "Sporting Braga", "guimaraes": "Vitoria Guimaraes",
+    "for-sittard": "Fortuna Sittard", "psv-eindhoven": "PSV Eindhoven",
+}
+
+# clubs whose record their search never returns (shadowed by a same-name team in
+# another sport): resolved by direct id lookup instead
+TSDB_TEAM_IDS = {
+    "nott-m-forest": "133720",     # the search only finds the netball club
+}
+
+
+def _tsdb_best_match(cands: list, t: dict):
+    """The TSDB record that is genuinely this team, or None. Never settle for
+    'first search hit': that's how 'Sociedad' once resolved to a village club
+    instead of Real Sociedad. Exact name wins; otherwise our name's words must
+    be contained in theirs, backed up by country/league agreement."""
+    want = TSDB_SEARCH_ALIASES.get(t["id"], t["name"])
+    nk = norm_key(want)
+    toks = set(slug(want).split("-")) - {"fc", "cf", "ac", "sc", "de", "cd"}
+    country = (t.get("country") or "").lower()
+    lg = (t.get("league_name") or "").lower()
+
+    def score(x):
+        xname = x.get("strTeam") or ""
+        s = 0
+        if norm_key(xname) == nk:
+            s += 100
+        if toks and toks <= set(slug(xname).split("-")):
+            s += 40
+        if country and (x.get("strCountry") or "").lower() == country:
+            s += 30
+        if lg and lg in (x.get("strLeague") or "").lower():
+            s += 20
+        return s
+
+    best = max(cands, key=score, default=None)
+    return best if best is not None and score(best) >= 60 else None
+
+
+def _tsdb_search_team(t: dict):
+    """searchteams.php with the canonical name, filtered to a confident match.
+    Their search misses some records unless the query is lowercase (e.g.
+    'Nottingham Forest' finds nothing, 'nottingham forest' works), so retry."""
+    known = TSDB_TEAM_IDS.get(t["id"])
+    if known:
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/lookupteam.php",
+                         params={"id": known}, headers=UA, timeout=8)
+        rec = ((r.json() or {}).get("teams") or [None])[0]
+        return rec if rec and rec.get("strSport") == "Soccer" else None
+    q = TSDB_SEARCH_ALIASES.get(t["id"], t["name"])
+    for query in dict.fromkeys((q, q.lower())):
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
+                         params={"t": query}, headers=UA, timeout=8)
+        soccer = [x for x in (r.json() or {}).get("teams") or []
+                  if x.get("strSport") == "Soccer"]
+        best = _tsdb_best_match(soccer, t)
+        if best is not None:
+            return best
+    return None
+
+
 def _tsdb_team(team_id: str) -> dict:
     """Resolve a team on TheSportsDB: badge URL + their canonical team name."""
     t = _team_or_404(team_id)
@@ -469,19 +545,13 @@ def _tsdb_team(team_id: str) -> dict:
         cached = _logo_cache.get(team_id)
     if isinstance(cached, dict) and "colors" in cached:   # old entries lack fields: refetch
         return cached
-    name = t["name"]
     entry = {"badge": cached.get("badge") if isinstance(cached, dict) else
              cached if isinstance(cached, str) else None,
              "tsdb_name": None, "fanart": None, "stadium": None, "capacity": None,
              "colors": []}
     try:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
-                         params={"t": name}, headers=UA, timeout=8)
-        teams = (r.json() or {}).get("teams") or []
-        soccer = [x for x in teams if x.get("strSport") == "Soccer"]
-        if soccer:
-            exact = [x for x in soccer if norm_key(x.get("strTeam", "")) == norm_key(name)]
-            best = (exact or soccer)[0]
+        best = _tsdb_search_team(t)
+        if best is not None:
             entry = {"badge": best.get("strBadge"), "tsdb_name": best.get("strTeam"),
                      "fanart": best.get("strFanart1") or best.get("strBanner"),
                      "stadium": best.get("strStadium"),
@@ -550,11 +620,7 @@ def _tsdb_squad(team_id: str) -> list[dict]:
     t = _team_or_404(team_id)
     players = []
     try:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
-                         params={"t": t["name"]}, headers=UA, timeout=8)
-        teams = [x for x in (r.json() or {}).get("teams") or [] if x.get("strSport") == "Soccer"]
-        exact = [x for x in teams if norm_key(x.get("strTeam", "")) == norm_key(t["name"])]
-        best = (exact or teams)[0] if teams else None
+        best = _tsdb_search_team(t)
         if best:
             r2 = requests.get("https://www.thesportsdb.com/api/v1/json/3/lookup_all_players.php",
                               params={"id": best["idTeam"]}, headers=UA, timeout=8)
