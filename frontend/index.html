@@ -9,7 +9,7 @@
 <link rel="manifest" href="/static/manifest.json">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=41">
+<link rel="stylesheet" href="/static/style.css?v=42">
 </head>
 <body>
 <div class="shell">
@@ -40,9 +40,8 @@
                 <div class="meta"></div><div class="dd" hidden></div>
               </div>
               <div class="vscol"><div class="vs">VS</div>
-                <button class="swapbtn" id="swap" disabled title="Switch home and away">
-                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg>
-                  swap</button></div>
+                <button class="swapbtn" id="swap" disabled title="Switch home and away" aria-label="Switch home and away">
+                  <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/></svg></button></div>
               <div class="slot" id="slot-away">
                 <label>AWAY</label>
                 <div class="pick"><img class="badge" hidden><input placeholder="Search any team…" autocomplete="off"></div>
@@ -92,6 +91,6 @@
     </section>
   </main>
 </div>
-<script src="/static/app.js?v=41"></script>
+<script src="/static/app.js?v=42"></script>
 </body>
 </html>

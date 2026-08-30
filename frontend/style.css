@@ -78,9 +78,10 @@ h3.sec .note { margin-left: auto; font-size: 12px; color: var(--muted); font-wei
 .slot .meta { font-size: 12px; color: var(--muted); margin-top: 5px; min-height: 16px; }
 .vscol { display: grid; place-items: center; align-content: center; gap: 8px; }
 .vs { font-style: italic; font-weight: 900; color: var(--dim); font-size: 18px; }
-.swapbtn { display: inline-flex; align-items: center; gap: 5px; border: 1px solid var(--line);
-  border-radius: 999px; padding: 5px 11px; background: var(--panel); color: var(--dim);
-  font-size: 12px; font-weight: 700; cursor: pointer; transition: border-color .15s, transform .12s; }
+.swapbtn { display: inline-flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--panel); color: var(--dim); cursor: pointer;
+  transition: border-color .15s, transform .12s; }
 .swapbtn:hover { border-color: var(--green); color: var(--green-deep); transform: translateY(-1px); }
 .swapbtn:disabled { opacity: .4; pointer-events: none; }
 .dd { position: absolute; left: 0; right: 0; top: calc(100% + 6px); background: var(--panel);
