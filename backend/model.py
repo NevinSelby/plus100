@@ -160,6 +160,17 @@ def markets_from_matrix(mat: np.ndarray) -> dict:
         p = float(mat[(idx[:, None] + h) > idx[None, :]].sum())
         hcap[f"home {h:+g}"] = round(p, 4)
 
+    # winning margin: the same matrix folded into goal-difference buckets,
+    # which reads far more naturally than a wall of exact scorelines
+    diff = idx[:, None] - idx[None, :]
+    margins = {
+        "home_by_2_plus": round(float(mat[diff >= 2].sum()), 4),
+        "home_by_1": round(float(mat[diff == 1].sum()), 4),
+        "draw": round(p_draw, 4),
+        "away_by_1": round(float(mat[diff == -1].sum()), 4),
+        "away_by_2_plus": round(float(mat[diff <= -2].sum()), 4),
+    }
+
     return {
         "one_x_two": {
             "home": round(p_home, 4), "draw": round(p_draw, 4), "away": round(p_away, 4),
@@ -179,6 +190,7 @@ def markets_from_matrix(mat: np.ndarray) -> dict:
         "clean_sheet": {"home": round(float(mat[:, 0].sum()), 4),
                         "away": round(float(mat[0, :].sum()), 4)},
         "handicaps": hcap,
+        "margins": margins,
         "correct_scores": top_scores,
     }
 
@@ -619,6 +631,25 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
     verdict_key = max(("home", "draw", "away"), key=lambda k: n1x2[k])
     verdict = {"home": f"{rh['name']} win", "draw": "Draw", "away": f"{ra['name']} win"}[verdict_key]
 
+    # one honest sentence about the SHAPE of the game, from the margin buckets
+    mg = mk["margins"]
+    tight = mg["draw"] + mg["home_by_1"] + mg["away_by_1"]
+    if mg["home_by_2_plus"] >= 0.40:
+        margin_note = (f"{rh['name']} by two or more goals is the likeliest shape "
+                       f"({mg['home_by_2_plus']:.0%}), though {tight:.0%} of the time "
+                       "this still stays within a single goal.")
+    elif mg["away_by_2_plus"] >= 0.40:
+        margin_note = (f"{ra['name']} by two or more goals is the likeliest shape "
+                       f"({mg['away_by_2_plus']:.0%}), though {tight:.0%} of the time "
+                       "this still stays within a single goal.")
+    elif tight >= 0.55:
+        margin_note = (f"Tough to call: {tight:.0%} of the time this ends level or is "
+                       "settled by a single goal, so expect it tight either way.")
+    else:
+        lead = rh["name"] if n1x2["home"] >= n1x2["away"] else ra["name"]
+        margin_note = (f"A {lead} lean, but no margin dominates: the game is about as "
+                       f"likely to stay within one goal ({tight:.0%}) as to open up.")
+
     return {
         "home": {"id": home, "name": rh["name"], "elo": rh["elo_global"],
                  "league": rh["league_name"], "country": rh["country"]},
@@ -630,6 +661,7 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         "context_applied": eg.get("context"),
         "verdict": {"call": verdict, "confidence": round(max(n1x2["home"], n1x2["draw"], n1x2["away"]), 3),
                     "predicted_score": mk["correct_scores"][0]["score"]},
+        "margin_note": margin_note,
         "markets": mk,
         "score_matrix": [[round(float(mat[i, j]), 5) for j in range(7)] for i in range(7)],
         "likely_scorers": scorers,

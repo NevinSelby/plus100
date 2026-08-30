@@ -401,10 +401,25 @@ function renderPrediction(out, p, hh, lu) {
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.clock} When the goals should come <span class="note">stoppage-time spikes are real</span></h3>${goalRiver(p, khl, kal)}
         <div class="mini">Each side's scoring threat minute by minute, in their real colors. The wider the river, the likelier they strike.</div></div>
-      <div class="card"><h3 class="sec">${ICONS.grid} Exact score probabilities <span class="note">most likely ≈ 1 in ${Math.max(2, Math.round(1 / p.markets.correct_scores[0].prob))}</span></h3>
-        <table class="heat"><tr><td></td>${[...Array(N)].map((_, j) => `<td class="mini">${j}</td>`).join("")}</tr>${heat}</table>
-        <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals</div>
-        <div class="scores">${p.markets.correct_scores.slice(0, 4).map(cs => `<div class="sc"><b>${esc(cs.score)}</b><span>${pct(cs.prob)}</span></div>`).join("")}</div></div>
+      <div class="card"><h3 class="sec">${ICONS.grid} Winning margin <span class="note">how far apart they finish</span></h3>
+        ${(() => {
+          const mg = p.markets.margins;
+          if (!mg) return `<div class="scores">${p.markets.correct_scores.slice(0, 4).map(cs => `<div class="sc"><b>${esc(cs.score)}</b><span>${pct(cs.prob)}</span></div>`).join("")}</div>`;
+          const rows = [
+            [`${p.home.name} by 2+`, mg.home_by_2_plus, "var(--green)"],
+            [`${p.home.name} by 1`, mg.home_by_1, "var(--green)"],
+            ["Level", mg.draw, "#9AA69C"],
+            [`${p.away.name} by 1`, mg.away_by_1, "#4D9FDB"],
+            [`${p.away.name} by 2+`, mg.away_by_2_plus, "#4D9FDB"],
+          ];
+          const max = Math.max(...rows.map(r => r[1]), 0.01);
+          return rows.map(([label, prob, col]) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
+            <div class="hbar"><div style="width:${prob / max * 100}%;background:${col}"></div></div>
+            <span class="val">${pct(prob)}</span></div>`).join("")
+            + `<div class="mini" style="margin-top:8px">${esc(p.margin_note || "")}</div>`;
+        })()}
+        <table class="heat" style="margin-top:12px"><tr><td></td>${[...Array(N)].map((_, j) => `<td class="mini">${j}</td>`).join("")}</tr>${heat}</table>
+        <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals · likeliest single score ${esc(p.markets.correct_scores[0].score)} (${pct(p.markets.correct_scores[0].prob)})</div></div>
     </div>
     <div class="card"><h3 class="sec">${ICONS.users} Probable line-ups</h3><div id="pitchbox">${pitchHTML(lu, kh, ka)}</div></div>
     <div class="duo">

@@ -1321,18 +1321,49 @@ function PredictScreen(props) {
               : <Text style={s.dimTxt}>No public squad data for this pairing yet.</Text>}
           </Card>
 
-          {/* -------- scoreline heatmap -------- */}
+          {/* -------- winning margin + scoreline heatmap -------- */}
           <Card delay={70}>
-            <SectionTitle icon="grid" note={`most likely is ~1 in ${Math.max(2, Math.round(1 / p.markets.correct_scores[0].prob))}`}>Exact score probabilities</SectionTitle>
-            <Heatmap matrix={p.score_matrix} homeName={p.home.name} awayName={p.away.name} />
-            <View style={[s.rowWrap, { marginTop: 10 }]}>
-              {p.markets.correct_scores.slice(0, 4).map((cs) => (
-                <View key={cs.score} style={s.chip}>
-                  <Text style={[s.chipTop, TNUM]}>{cs.score}</Text>
-                  <Text style={[s.chipSub, TNUM]}>{(cs.prob * 100).toFixed(1)}%</Text>
+            <SectionTitle icon="grid" note="how far apart they finish">Winning margin</SectionTitle>
+            {p.markets.margins ? (() => {
+              const mg = p.markets.margins;
+              const rows = [
+                [`${p.home.name} by 2+`, mg.home_by_2_plus, C.lime],
+                [`${p.home.name} by 1`, mg.home_by_1, C.lime],
+                ["Level", mg.draw, C.muted],
+                [`${p.away.name} by 1`, mg.away_by_1, C.sky],
+                [`${p.away.name} by 2+`, mg.away_by_2_plus, C.sky],
+              ];
+              const max = Math.max(...rows.map((r) => r[1]), 0.01);
+              return (
+                <View>
+                  {rows.map(([label, prob, col]) => (
+                    <View key={label} style={s.mktRow}>
+                      <Text style={s.mktLabel} numberOfLines={1}>{label}</Text>
+                      <View style={{ flex: 1, marginHorizontal: 10 }}>
+                        <HBar frac={prob / max} color={col} height={6} />
+                      </View>
+                      <Text style={[s.mktVal, TNUM]}>{(prob * 100).toFixed(0)}%</Text>
+                    </View>
+                  ))}
+                  {!!p.margin_note && <Text style={[s.dimTxt, { marginTop: 8 }]}>{p.margin_note}</Text>}
                 </View>
-              ))}
+              );
+            })() : (
+              <View style={[s.rowWrap, { marginTop: 10 }]}>
+                {p.markets.correct_scores.slice(0, 4).map((cs) => (
+                  <View key={cs.score} style={s.chip}>
+                    <Text style={[s.chipTop, TNUM]}>{cs.score}</Text>
+                    <Text style={[s.chipSub, TNUM]}>{(cs.prob * 100).toFixed(1)}%</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            <View style={{ marginTop: 12 }}>
+              <Heatmap matrix={p.score_matrix} homeName={p.home.name} awayName={p.away.name} />
             </View>
+            <Text style={s.axisNote}>
+              likeliest single score {p.markets.correct_scores[0].score} ({(p.markets.correct_scores[0].prob * 100).toFixed(1)}%)
+            </Text>
           </Card>
 
           {/* -------- markets -------- */}
