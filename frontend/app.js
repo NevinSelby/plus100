@@ -149,7 +149,10 @@ function wireSlot(id, key) {
           b.onclick = () => pickTeam(key, t);
           dd.appendChild(b);
         });
-        dd.hidden = opts.length === 0;
+        if (opts.length === 0) {
+          dd.innerHTML = `<button disabled><div class="l">No teams match</div><div class="s">try the club's short name, e.g. "Sociedad" or "Milan"</div></button>`;
+          dd.hidden = false;
+        } else dd.hidden = false;
       } catch {
         if (!S.meta) {
           dd.innerHTML = `<button disabled><div class="l">The server is still waking up…</div><div class="s">search again in a few seconds</div></button>`;
@@ -330,7 +333,7 @@ function goalRiver(p, kh, ka) {
 }
 
 function pitchHTML(lu, kh, ka) {
-  if (!lu) return `<div class="mini">No public squad data for this pairing.</div>`;
+  if (!lu) return `<div class="mini">No public squad data exists for this pairing, so no line-up is shown. The prediction itself is unaffected: it comes from results, ratings and team news, not this graphic.</div>`;
   const ROW_Y = [0.92, 0.80, 0.685, 0.565];
   const W = 100, H = 152;   /* percent-based positioning inside an aspect box */
   let dots = "";
@@ -397,7 +400,23 @@ function renderPrediction(out, p, hh, lu) {
       <div class="hbar"><div style="width:${x.prob_to_score*100}%;background:${rateColor(x.prob_to_score,.25,.12)}"></div></div>
       <span class="val" style="color:${rateColor(x.prob_to_score,.25,.12)}">${Math.round(x.prob_to_score*100)}%</span></div>`).join("")}</div>` : "").join("");
 
-  out.innerHTML = heroHTML(p) + `
+  const openingHTML = (() => {
+    const fg = p.markets.first_goal, ht = p.markets.half_time;
+    if (!fg || !ht) return "";
+    const bar = (label, prob, col) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
+      <div class="hbar"><div style="width:${prob * 100}%;background:${col}"></div></div>
+      <span class="val">${pct(prob)}</span></div>`;
+    return `<div class="duo">
+      <div class="card"><h3 class="sec">${ICONS.zap || ICONS.clock} First team to score</h3>
+        ${bar(p.home.name, fg.home, "var(--green)")}${bar(p.away.name, fg.away, "#4D9FDB")}${bar("Neither (0-0)", fg.none, "#9AA69C")}
+        <div class="mini">Who breaks the deadlock, from each side's share of the expected goals.</div></div>
+      <div class="card"><h3 class="sec">${ICONS.clock} At half-time</h3>
+        ${bar(`${p.home.name} ahead`, ht.home, "var(--green)")}${bar("Level", ht.draw, "#9AA69C")}${bar(`${p.away.name} ahead`, ht.away, "#4D9FDB")}
+        <div class="mini">Likeliest half-time score ${esc(ht.score)} (${pct(ht.score_prob)}) · ${pct(ht.over_05, 0)} chance of a goal before the break. Goals cluster late, so half-time leads are smaller than full-time ones.</div></div>
+    </div>`;
+  })();
+
+  out.innerHTML = heroHTML(p) + openingHTML + `
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.clock} When the goals should come <span class="note">stoppage-time spikes are real</span></h3>${goalRiver(p, khl, kal)}
         <div class="mini">Each side's scoring threat minute by minute, in their real colors. The wider the river, the likelier they strike.</div></div>
@@ -419,7 +438,7 @@ function renderPrediction(out, p, hh, lu) {
             + `<div class="mini" style="margin-top:8px">${esc(p.margin_note || "")}</div>`;
         })()}
         <table class="heat" style="margin-top:12px"><tr><td></td>${[...Array(N)].map((_, j) => `<td class="mini">${j}</td>`).join("")}</tr>${heat}</table>
-        <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals · likeliest single score ${esc(p.markets.correct_scores[0].score)} (${pct(p.markets.correct_scores[0].prob)})</div></div>
+        <div class="mini">rows: ${esc(p.home.name)} goals · columns: ${esc(p.away.name)} goals · each cell is the % chance of that exact score · likeliest is ${esc(p.markets.correct_scores[0].score)} (${pct(p.markets.correct_scores[0].prob)})</div></div>
     </div>
     <div class="card"><h3 class="sec">${ICONS.users} Probable line-ups</h3><div id="pitchbox">${pitchHTML(lu, kh, ka)}</div></div>
     <div class="duo">
@@ -507,7 +526,9 @@ $("#sweep").onclick = async () => {
     out.innerHTML = "";
     if (!rows.length) {
       out.append(h("div", "card", `<h3 class="sec">${ICONS.bar} Nothing to grade right now</h3><div class="sub" style="margin:0">${
-        params ? "The books aren't listing this match yet, so there's nothing to grade. Prices usually appear a day or two before kickoff."
+        params ? (d.fixtures === 1
+          ? "The books list this match, but none of its markets can be graded right now."
+          : "The books aren't listing this match yet, so there's nothing to grade. Prices usually appear a day or two before kickoff.")
         : d.fixtures === 0 ? "The books aren't listing football in the next two days. This happens between rounds; check back on a match week."
         : `Checked ${d.fixtures} listed game${d.fixtures === 1 ? "" : "s"}. No price beats the combined estimate right now, which is the normal state. Not betting today costs you nothing.`}</div>`));
       return;
@@ -521,6 +542,7 @@ $("#sweep").onclick = async () => {
         ${b.match ? `<div class="mini" style="margin-top:2px">${esc(b.match)}</div>` : ""}
         <div class="pair"><span class="tag">books say</span><div class="hbar"><div style="width:${b.p_market*100}%;background:var(--blue)"></div></div><span class="val">${pct(b.p_market, 0)}</span></div>
         <div class="pair"><span class="tag">we say</span><div class="hbar"><div style="width:${b.p_model*100}%;background:var(--green)"></div></div><span class="val">${pct(b.p_model, 0)}</span></div>
+        ${b.p_blend != null ? `<div class="pair"><span class="tag">combined</span><div class="hbar"><div style="width:${b.p_blend*100}%;background:#7FB78E"></div></div><span class="val">${pct(b.p_blend, 0)}</span></div>` : ""}
         <div class="mini">best price ${odds(b.odds)} at ${esc(b.book)}${b.at_hardrock ? " (Hard Rock)" : ""} · implies ${(100 / b.odds).toFixed(0)}%${good ? ` · stake ${b.quarter_kelly_pct}% of bankroll` : ""}</div>`));
     });
     out.append(grid);
@@ -649,7 +671,7 @@ function renderAbout() {
     <h3 class="sec">Probabilities are not certainty</h3>
     <p class="sub">A 60% chance fails 4 times in 10. Even the strongest flagged bet loses regularly; edges only appear across many bets. There is no 100% win rate, here or anywhere.</p>
     <h3 class="sec">Measured, honest accuracy</h3>
-    <p class="sub">Accuracy is re-measured automatically at every data refresh. Random guessing on three outcomes gets 33%; always picking the home side about 44%. Probabilities are calibrated: when we say 40%, it happens about 40% of the time.</p>
+    <p class="sub">Accuracy is re-measured automatically at every data refresh. Random guessing on three outcomes gets 33%, and always picking the home side does better than a coin flip, so the model has to clear a higher bar than it may look. Probabilities are calibrated: when we say 40%, it happens about 40% of the time.</p>
     ${fe ? `<h3 class="sec">How good the fantasy projections are</h3><p class="sub">${esc(fe.note)}</p>` : ""}
     <h3 class="sec">Where edges really come from</h3>
     <p class="sub">Against closing prices nothing out-predicts the market, including this model — tested on thousands of unseen matches, adding our model to the closing price made predictions slightly worse, not better. Edges come from disagreements between books, soft early prices, and boosts. That is what Vs Market hunts.</p>

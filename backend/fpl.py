@@ -22,7 +22,6 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import numpy as np
 import requests
 
 from .data_store import Store, norm_key
@@ -429,7 +428,6 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
                         "in": cand["name"], "in_xpts": cand["xpts"],
                         "gain": round(gain, 2),
                         "cost_delta": round(cand["price"] - out_p["price"], 1)}
-    GAIN_BAR = 0.7      # below this, projection noise; keep the free transfer banked
     if best and best["gain"] >= GAIN_BAR:
         advice = {"action": "transfer", **best,
                   "reason": (f"Use a free transfer: {best['out']} "
@@ -468,7 +466,7 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
 
 _MODEL_LOCK = threading.Lock()
 STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "fpl_state.json"
-GAIN_BAR_MODEL = 0.7
+GAIN_BAR = 0.7        # below this a swap is projection noise: bank the transfer
 
 SEED = [  # the squad the app recommended and the user actually built (GW1, £99.5m)
     ("Kelleher", "GK"), ("Virgil", "DEF"), ("O'Reilly", "DEF"), ("Tarkowski", "DEF"),
@@ -769,7 +767,7 @@ def _model_squad_locked(store: Store) -> dict:
                     if best is None or gain > best["gain"]:
                         best = {"out": out_p, "cand": cand, "gain": round(gain, 2),
                                 "sell": sell}
-            if not best or best["gain"] < GAIN_BAR_MODEL:
+            if not best or best["gain"] < GAIN_BAR:
                 break
             o, c = best["out"], best["cand"]
             st["bank"] = round(st["bank"] + best["sell"] - c["price"], 1)

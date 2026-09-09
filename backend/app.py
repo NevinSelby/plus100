@@ -1,4 +1,4 @@
-"""FastAPI app: team search, head-to-head stats, predictions, logos, Reddit buzz."""
+"""FastAPI app: team search, head-to-head stats, predictions, lineups, fantasy, odds."""
 from __future__ import annotations
 
 import hashlib
@@ -291,14 +291,21 @@ def _auto_absences(tid: str) -> list[str]:
     # and are never capped
     outs = _news_absences(tid, names)[:3]
     if reg.get("scope") == "club":
-        try:
-            from .fpl import club_unavailable
-            for f in club_unavailable(store, tid):
-                hit = _match_tracked(f["name"], names)
-                if hit and hit not in outs:
-                    outs.append(hit)
-        except Exception:  # noqa: BLE001
-            pass
+        outs = _fpl_flagged_outs(tid, names, outs)
+    return outs
+
+
+def _fpl_flagged_outs(tid: str, names: list[str], outs: list[str]) -> list[str]:
+    """Append players the OFFICIAL FPL availability feed flags as out/doubtful.
+    Authoritative, so never capped; no-op for non-PL clubs and on any error."""
+    try:
+        from .fpl import club_unavailable
+        for f in club_unavailable(store, tid):
+            hit = _match_tracked(f["name"], names)
+            if hit and hit not in outs:
+                outs.append(hit)
+    except Exception:  # noqa: BLE001
+        pass
     return outs
 
 
@@ -375,15 +382,6 @@ def predict_endpoint(request: Request, home: str, away: str, neutral: bool = Fal
 from pydantic import BaseModel
 
 
-class ParlayReq(BaseModel):
-    home: str
-    away: str
-    legs: list[str]
-    neutral: bool = False
-    price: float = 0.0
-    context: str = "none"
-
-
 def _outs_for_pair(home: str, away: str) -> tuple[list, list]:
     """Best-effort auto absences; never blocks the endpoint."""
     try:
@@ -403,32 +401,6 @@ def parlay_suggest(home: str, away: str, neutral: bool = False, context: str = "
     oh, oa = _outs_for_pair(home, away)
     return suggest_parlays(store, home, away, neutral, context=context,
                            out_home=oh, out_away=oa)
-
-
-@app.post("/api/parlay")
-def parlay_endpoint(req: ParlayReq):
-    _require_store()
-    from .model import simulate_sgp
-    _team_or_404(req.home)
-    _team_or_404(req.away)
-    if req.home == req.away:
-        raise HTTPException(400, "pick two different teams")
-    if not req.legs:
-        raise HTTPException(400, "no legs given")
-    oh, oa = _outs_for_pair(req.home, req.away)
-    try:
-        r = simulate_sgp(store, req.home, req.away, req.legs, req.neutral, req.context,
-                         out_home=oh, out_away=oa)
-    except ValueError as e:
-        raise HTTPException(400, str(e))
-    if req.price and req.price > 1:
-        p = r["joint_prob"]
-        edge = p * req.price - 1
-        b = req.price - 1
-        r["book_price"] = req.price
-        r["edge_pct"] = round(edge * 100, 2)
-        r["quarter_kelly_pct"] = round(max(0.0, (p * b - (1 - p)) / b) * 25, 2)
-    return r
 
 
 @app.get("/api/bestbets")
@@ -481,7 +453,7 @@ TSDB_SEARCH_ALIASES = {
     "nott-m-forest": "Nottingham Forest", "sheffield-weds": "Sheffield Wednesday",
     "qpr": "Queens Park Rangers", "west-brom": "West Bromwich Albion",
     "wolves": "Wolverhampton Wanderers", "man-united": "Manchester United",
-    "man-city": "Manchester City", "spurs": "Tottenham Hotspur",
+    "man-city": "Manchester City", "tottenham": "Tottenham Hotspur",
     "ein-frankfurt": "Eintracht Frankfurt", "m-gladbach": "Borussia Monchengladbach",
     "leverkusen": "Bayer Leverkusen", "dortmund": "Borussia Dortmund",
     "hertha": "Hertha Berlin", "milan": "AC Milan", "inter": "Inter Milan",
@@ -622,7 +594,7 @@ def _pos_x_order(pos: str) -> int:
 
 
 def _tsdb_squad(team_id: str) -> list[dict]:
-    """Squad players with position + cutout photo, cached a few days on disk."""
+    """Squad players with position + cutout photo, cached one day on disk."""
     with _lineup_lock:
         hit = _lineup_cache.get(team_id)
     if hit and time.time() - hit["at"] < _SQUAD_TTL:
@@ -802,15 +774,7 @@ def _team_lineup(tid: str, lam: float) -> dict:
     # or a single injury headline can leave a side with no keeper or no striker
     outs = _news_absences(tid, [p["name"] for p in squad])
     if reg.get("scope") == "club":
-        try:
-            from .fpl import club_unavailable
-            squad_names = [p["name"] for p in squad]
-            for fl in club_unavailable(store, tid):
-                hit = _match_tracked(fl["name"], squad_names)
-                if hit and hit not in outs:
-                    outs.append(hit)
-        except Exception:  # noqa: BLE001
-            pass
+        outs = _fpl_flagged_outs(tid, [p["name"] for p in squad], outs)
     if outs:
         kept, dropped = [], []
         for p in squad:
@@ -956,32 +920,6 @@ def _verify_squads(pred: dict):
         pred["likely_scorers"][team["name"]] = kept
 
 
-@app.get("/api/buzz")
-def buzz(home: str, away: str):
-    """Recent Reddit chatter about the two teams (best-effort; may be rate limited)."""
-    th, ta = _team_or_404(home), _team_or_404(away)
-    q = f'"{th["name"]}" "{ta["name"]}"'
-    posts, note = [], None
-    try:
-        r = requests.get("https://www.reddit.com/search.json",
-                         params={"q": q, "sort": "new", "limit": 10, "t": "month"},
-                         headers=UA, timeout=8)
-        if r.status_code == 200:
-            for c in r.json().get("data", {}).get("children", []):
-                d = c["data"]
-                posts.append({"title": d["title"], "subreddit": d["subreddit"],
-                              "score": d["score"], "num_comments": d["num_comments"],
-                              "url": "https://reddit.com" + d["permalink"]})
-        else:
-            note = f"Reddit returned HTTP {r.status_code}"
-    except Exception as e:  # noqa: BLE001
-        note = f"Reddit unreachable: {e}"
-    if not posts and not note:
-        note = "No recent Reddit posts mention both teams."
-    return {"posts": posts, "note": note,
-            "disclaimer": "Social buzz is shown for context only; it is not part of the statistical model."}
-
-
 KEY_FILE = ROOT / "data" / "oddsapi_key.txt"
 
 
@@ -994,31 +932,6 @@ def _resolve_key(key: str = "") -> str:
     if KEY_FILE.exists():
         return KEY_FILE.read_text().strip()
     return ""
-
-
-@app.get("/api/scan")
-def scan_endpoint(key: str = "", sports: str = ""):
-    """Cross-book arb scan via The Odds API (user-supplied free key)."""
-    from .scanner import scan
-    k = _resolve_key(key)
-    if not k:
-        return {"error": "no_key", "detail": "No API key configured."}
-    sport_list = [s for s in sports.split(",") if s.strip()] or None
-    return scan(k, sport_list)
-
-
-@app.get("/api/scan/sports")
-def scan_sports(key: str = ""):
-    from .scanner import list_soccer_sports
-    try:
-        return list_soccer_sports(_resolve_key(key))
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(502, f"could not list competitions: {e}")
-
-
-# NOTE: football-only for now. Multi-sport support lives in backend/sports.py
-# (events browser, market consensus, line shopping for NFL/NBA/MLB/NHL etc.) —
-# re-add the /api/sports/* endpoints here when it's wanted again.
 
 
 @app.get("/api/fpl/squad")
@@ -1067,13 +980,6 @@ def meta():
         "data_from": str(m.date.min().date()),
         "data_to": str(m.date.max().date()),
         "xg_data_to": store.xg_data_to,
-        "backtest": {
-            "test_matches": 1827, "period": "Oct 2025 – Jan 2026",
-            "model_accuracy": 0.504, "bookmaker_accuracy": 0.510,
-            "model_brier": 0.6025, "bookmaker_brier": 0.5932,
-            "note": "Full model (Elo + xG-blended strengths) under live conditions vs closing odds; "
-                    "calibration verified per decile on a 14,432-match walk-forward test.",
-        },
         "fantasy_eval": {
             "pairs": 734,
             "xg_only": 0.384, "record_only": 0.525, "blended": 0.543,
@@ -1086,7 +992,7 @@ def meta():
             "market_weight": 0.75,
             "note": "Validated on 4,227 unseen matches: accuracy improves monotonically toward "
                     "the market (optimum 1.0), but 0.75 costs only +0.0008 Brier, within noise. "
-                    "0.75 is the maximum model weight the data defends.",
+                    "A 25% model share is the most the data defends.",
         },
         "live_eval": ({**store.live_eval,
                        "note": "Rolling window check of the Elo-driven core — the component "

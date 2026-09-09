@@ -1,7 +1,7 @@
-/* Plus100 mobile: quantitative decision engine (Expo Go, SDK 54).
+/* Plus100 mobile: quantitative decision engine (Expo Go, latest SDK).
    Data-dense dashboard: probability visuals, real formulas with this match's
    numbers, H2H / form / Elo-history analytics. Backend: FastAPI on Mac or
-   cloud (server address editable in header). */
+   cloud (server address editable in Settings). */
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather, Ionicons } from "@expo/vector-icons";
 import React, { useEffect, useRef, useState } from "react";
@@ -67,7 +67,7 @@ function matchColors(home, away, onDark) {
   const h = kitColor(home?.colors?.[0], onDark) || fbH;
   let a = kitColor(away?.colors?.[0], onDark);
   if (!a || colorDist(h, a) < 95) a = kitColor(away?.colors?.[1], onDark);
-  if (!a || colorDist(h, a) < 95) a = colorDist(h, fbA) < 95 ? "#E8890C" : fbA;
+  if (!a || colorDist(h, a) < 95) a = colorDist(h, fbA) < 95 ? "#D97E06" : fbA;
   return [h, a];
 }
 
@@ -143,7 +143,7 @@ function Root() {
   const [tab, setTab] = useState("predict");
   const [home, setHome] = useState(null);
   const [away, setAway] = useState(null);
-  const [neutral, setNeutral] = useState(true);   // neutral venue by default
+  const [neutral, setNeutral] = useState(false);  // auto-set on team pick
   const [prediction, setPrediction] = useState(null);
   const [h2h, setH2h] = useState(null);
   const [showDetails, setShowDetails] = useState(false);
@@ -588,8 +588,8 @@ function EdgeMeter({ edgePct }) {
 
 function Heatmap({ matrix, homeName, awayName }) {
   const N = 6;
-  let maxP = 0;
-  matrix.forEach((row) => row.forEach((v) => { maxP = Math.max(maxP, v); }));
+  let maxP = 0;   // normalize over the visible 6x6 so shading matches the web
+  matrix.slice(0, N).forEach((row) => row.slice(0, N).forEach((v) => { maxP = Math.max(maxP, v); }));
   return (
     <View>
       <View style={s.heatRow}>
@@ -1300,6 +1300,45 @@ function PredictScreen(props) {
             </Pressable>
           </Card>
 
+          {/* -------- how the game opens: first goal + half-time -------- */}
+          {p.markets.first_goal && p.markets.half_time && (
+            <Card delay={20}>
+              <SectionTitle icon="play-circle">How the game opens</SectionTitle>
+              {[
+                [`${p.home.name} scores first`, p.markets.first_goal.home, C.lime],
+                [`${p.away.name} scores first`, p.markets.first_goal.away, C.sky],
+                ["Neither (0-0)", p.markets.first_goal.none, C.muted],
+              ].map(([label, prob, col]) => (
+                <View key={label} style={s.mktRow}>
+                  <Text style={s.mktLabel} numberOfLines={1}>{label}</Text>
+                  <View style={{ flex: 1, marginHorizontal: 10 }}>
+                    <HBar frac={prob} color={col} height={6} />
+                  </View>
+                  <Text style={[s.mktVal, TNUM]}>{(prob * 100).toFixed(0)}%</Text>
+                </View>
+              ))}
+              <View style={{ height: 10 }} />
+              {[
+                [`${p.home.name} ahead at half-time`, p.markets.half_time.home, C.lime],
+                ["Level at half-time", p.markets.half_time.draw, C.muted],
+                [`${p.away.name} ahead at half-time`, p.markets.half_time.away, C.sky],
+              ].map(([label, prob, col]) => (
+                <View key={label} style={s.mktRow}>
+                  <Text style={s.mktLabel} numberOfLines={1}>{label}</Text>
+                  <View style={{ flex: 1, marginHorizontal: 10 }}>
+                    <HBar frac={prob} color={col} height={6} />
+                  </View>
+                  <Text style={[s.mktVal, TNUM]}>{(prob * 100).toFixed(0)}%</Text>
+                </View>
+              ))}
+              <Text style={s.axisNote}>
+                Likeliest half-time score {p.markets.half_time.score} ({(p.markets.half_time.score_prob * 100).toFixed(0)}%),
+                and a {(p.markets.half_time.over_05 * 100).toFixed(0)}% chance of a goal before the break.
+                Goals cluster late, so half-time leads run smaller than full-time ones.
+              </Text>
+            </Card>
+          )}
+
           {/* -------- when the goals should come -------- */}
           <Card delay={30}>
             <SectionTitle icon="clock" note="stoppage-time spikes are real">
@@ -1485,7 +1524,7 @@ function BestBetsScreen({ api, home, away, bankroll }) {
       <Pressable style={({ pressed }) => [s.btn, busy && s.btnOff,
         { marginTop: 14, alignItems: "center" }, pressed && { opacity: 0.8 }]}
         disabled={busy} onPress={run}>
-        <Text style={s.btnTxt}>{busy ? "Checking prices…" : home && away ? "Compare this match" : "Scan the next two days"}</Text>
+        <Text style={s.btnTxt}>{busy ? "Checking prices…" : home && away ? `Grade ${home.name} v ${away.name}` : "Scan the next two days"}</Text>
       </Pressable>
       {!!err && <Text style={s.errTxt}>{err}</Text>}
       {busy && <BallLoader label="Shopping 15 sportsbooks for prices…" />}
@@ -1496,7 +1535,7 @@ function BestBetsScreen({ api, home, away, bankroll }) {
           <Text style={s.dimTxt}>
             {data.error === "quota"
               ? "The odds allowance for this month is used up; it resets on the 1st."
-              : "The server has no working Odds API key configured, so live prices can't be fetched."}
+              : (data.detail || "The server has no working Odds API key configured, so live prices can't be fetched.")}
           </Text>
         </Card>
       )}
@@ -1695,7 +1734,7 @@ function ModelTeam({ api }) {
           Finished rounds: {t.scores.map((x) => `GW${x.gw}: ${x.points}`).join(" · ")}
         </Text>
       )}
-      <Text style={s.axisNote}>{t.note}</Text>
+      <Text style={s.axisNote}>{t.note}{t.durable === false ? " Warning: durable storage is not connected on this server, so this team's history resets on restart." : ""}</Text>
     </View>
   );
 }
@@ -1927,7 +1966,7 @@ function SettingsScreen({ server, oddsFormat, bankroll, fplId, saveSettings, met
         <View style={[s.row, { marginTop: 12, gap: 10 }]}>
           <TextInput style={[s.input, { flex: 1, fontSize: 14 }]} value={serverDraft}
             onChangeText={setServerDraft} autoCapitalize="none" autoCorrect={false}
-            placeholder="http://10.0.0.218:8710" placeholderTextColor={C.muted} />
+            placeholder="http://192.168.1.20:8710" placeholderTextColor={C.muted} />
           <Pressable style={s.btn} onPress={() => saveSettings({ server: serverDraft.trim() })}>
             <Text style={s.btnTxt}>Save</Text>
           </Pressable>
@@ -2073,7 +2112,7 @@ function AboutScreen({ meta }) {
         and only at legal age.
       </S>
       <S title="Bet responsibly">
-        Never stake money you cannot afford to lose. ¼-Kelly stakes are caps, not targets.
+        Never stake money you cannot afford to lose. Suggested stakes are deliberately small fractions of a bankroll: treat them as caps, not targets.
         If gambling stops being fun, call 1-800-GAMBLER. Free, confidential, and open 24/7.
       </S>
     </ScrollView>
@@ -2133,7 +2172,7 @@ function DetailsModal({ visible, onClose, prediction, meta }) {
             down when they lose to weak ones. The rating is not a one-off number: it re-learns
             from every new result at each data refresh, and today's effective rating additionally
             discounts players who are missing right now. It is built from every result in our
-            {" "}{meta ? meta.matches.toLocaleString() : "154,063"}-match database, with recent
+            {" "}{meta ? `${meta.matches.toLocaleString()}-match` : "full-history"} database, with recent
             games counting the most.
           </Para>
           <Para>

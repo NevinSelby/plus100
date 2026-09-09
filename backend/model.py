@@ -252,9 +252,6 @@ def _absence_factor(store: Store, tid: str, out_players: list[str]) -> tuple[flo
 
 
 # --- same-game parlay legs: each is a boolean condition over (home goals, away goals)
-_G = np.arange(MAX_GOALS + 1)
-_H, _A = np.meshgrid(_G, _G, indexing="ij")
-
 FIRST_HALF_GOAL_SHARE = 0.456   # empirical share of goals scored before HT
 N_SIMS = 150_000
 
@@ -557,6 +554,34 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         la *= f
     mat = score_matrix(lh, la)
     mk = markets_from_matrix(mat)
+
+    # --- how the game opens: first goal + the half-time picture ---
+    # First scorer: both sides' scoring follow the same in-game time profile
+    # (the goal-flow weighting), so the profile cancels and the race is decided
+    # by the intensity ratio. "Neither scores" is the matrix's own 0-0 cell, so
+    # this agrees exactly with the displayed scoreline probabilities.
+    p_00 = float(mat[0, 0])
+    rate = lh / max(lh + la, 1e-9)
+    mk["first_goal"] = {
+        "home": round((1 - p_00) * rate, 4),
+        "away": round((1 - p_00) * (1 - rate), 4),
+        "none": round(p_00, 4),
+    }
+    # Half-time: goals cluster late, so the first half carries the empirical
+    # FIRST_HALF_GOAL_SHARE of scoring — the same constant the parlay legs use,
+    # so both endpoints price half-time identically.
+    ht_mat = score_matrix(lh * FIRST_HALF_GOAL_SHARE, la * FIRST_HALF_GOAL_SHARE)
+    hi, hj = np.unravel_index(int(ht_mat.argmax()), ht_mat.shape)
+    mk["half_time"] = {
+        "home": round(float(np.tril(ht_mat, -1).sum()), 4),
+        "draw": round(float(np.trace(ht_mat)), 4),
+        "away": round(float(np.triu(ht_mat, 1).sum()), 4),
+        "score": f"{int(hi)}-{int(hj)}",
+        "score_prob": round(float(ht_mat[hi, hj]), 4),
+        "over_05": round(1 - float(ht_mat[0, 0]), 4),
+        "over_15": round(float(ht_mat[(np.arange(ht_mat.shape[0])[:, None]
+                                       + np.arange(ht_mat.shape[1])[None, :]) > 1.5].sum()), 4),
+    }
 
     rh, ra = store.registry[home], store.registry[away]
     scorers = {}

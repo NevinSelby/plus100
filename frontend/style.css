@@ -203,7 +203,6 @@ td.num, th.num { text-align: right; }
   border-radius: 13px; padding: 10px 14px; margin-top: 12px; flex-wrap: wrap; }
 .bench .bp { text-align: center; width: 62px; font-size: 10.5px; color: var(--dim); }
 .bench img { width: 36px; height: 36px; border-radius: 18px; object-fit: cover; }
-.budget b.okc { color: var(--pitch); } .budget b.overc { color: var(--red); }
 
 @media (max-width: 780px) {
   .shell { flex-direction: column; }

@@ -260,7 +260,7 @@ def _targeted(key: str, store: Store, market_weight: float,
             selected = ({"match": rows[0]["match"], "commence": rows[0]["commence"],
                          "bets": rows} if rows else None)
             return {"bets": [], "selected": selected, "all_evaluated": len(rows or []),
-                    "fixtures": 1, "parlay_comparison": None,
+                    "fixtures": 1,
                     "skipped": [reason] if reason else [], "errors": errors,
                     "remaining_credits": remaining, "targeted": sport,
                     "method": f"targeted query: one odds call for this fixture only "
@@ -269,8 +269,7 @@ def _targeted(key: str, store: Store, market_weight: float,
                               f"market consensus + {int((1-market_weight)*100)}% model"}
         except requests.RequestException as e:
             errors.append(f"{sport}: {e}")
-    return {"bets": [], "selected": None, "all_evaluated": 0, "fixtures": 0,
-            "parlay_comparison": None, "skipped": [], "errors": errors,
+    return {"bets": [], "selected": None, "all_evaluated": 0, "fixtures": 0, "skipped": [], "errors": errors,
             "remaining_credits": remaining, "targeted": None,
             "method": "targeted query: fixture not listed by any book in the window "
                       "(no paid credits were spent)"}
@@ -279,7 +278,7 @@ def _targeted(key: str, store: Store, market_weight: float,
 # Fitted on 10,205 matches with odds (Jul 2024–Jun 2025), validated on 4,227
 # unseen (Jul 2025–Jan 2026): vs the market the optimal weight is 1.0, but the
 # Brier cost curve is nearly flat near the top — 0.75 costs only +0.0008,
-# within measurement noise. 0.75 is the maximum model weight the data defends;
+# within measurement noise. A 25% model share is the most the data defends;
 # it also grades earlier, softer prices where the model plausibly adds more.
 FITTED_MARKET_WEIGHT = 0.75
 
@@ -328,53 +327,15 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
             bets.extend(rows)
 
     bets.sort(key=lambda b: -b["edge_pct"])
-    selected = None
     # basic proportional de-vigging overstates longshot probability (books load
     # extra margin there), so long-priced outcomes must clear a higher bar
     # before being called value
     positive = [b for b in bets
                 if b["edge_pct"] > (2.5 if b["p_blend"] < 0.25 else 1.0)]
 
-    # cross-match parlays: best 2- and 3-leg combos of positive-edge legs,
-    # one leg per match (independent events -> probabilities multiply)
-    from itertools import combinations
-    uniq: list[dict] = []
-    seen_matches: set[str] = set()
-    for b in positive:
-        if b["match"] not in seen_matches:
-            uniq.append(b)
-            seen_matches.add(b["match"])
-        if len(uniq) == 6:
-            break
-    parlays = []
-    for k in (2, 3):
-        for combo in combinations(uniq, k):
-            p = 1.0
-            o = 1.0
-            for l in combo:
-                p *= l["p_blend"]
-                o *= l["odds"]
-            edge = p * o - 1
-            if edge <= 0:
-                continue
-            b_frac = o - 1
-            parlays.append({
-                "legs": [{"match": l["match"], "outcome": l["outcome"],
-                          "odds": l["odds"], "book": l["book"]} for l in combo],
-                "combined_odds": round(o, 2),
-                "fair_odds": round(1 / p, 2),
-                "win_prob": round(p, 4),
-                "edge_pct": round(edge * 100, 2),
-                "quarter_kelly_pct": round(
-                    max(0.0, (p * b_frac - (1 - p)) / b_frac) * 25, 2),
-                "bust_prob_pct": round((1 - p) * 100, 1),
-            })
-    parlays.sort(key=lambda x: -x["edge_pct"])
-    parlays = parlays[:4]
-
-    return {"bets": positive[:15], "selected": selected,
+    return {"bets": positive[:15], "selected": None,
             "all_evaluated": len(bets), "fixtures": fixtures,
-            "parlays": parlays, "skipped": skipped[:8], "errors": errors,
+            "skipped": skipped[:8], "errors": errors,
             "remaining_credits": remaining,
             "method": f"probabilities = {int(market_weight*100)}% de-vigged market consensus "
                       f"+ {int((1-market_weight)*100)}% model; edges use best price across books"}
