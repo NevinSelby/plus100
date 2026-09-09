@@ -1379,8 +1379,55 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
         _push(hid, aid, ko, league, country, odds, _DIV_RANK.get(div, 20))
 
     primary_n = len(out)
+
+    # ---- live layer: the odds service's events listing. Bookmaker-grade,
+    # continuously updated, and its events endpoint costs ZERO quota credits —
+    # so the rail is genuinely live even when the historical feed is quiet/down.
+    _ODDS_FIXTURE_SPORTS = [
+        ("soccer_epl", "Premier League", "England", 1),
+        ("soccer_efl_champ", "Championship", "England", 6),
+        ("soccer_spain_la_liga", "La Liga", "Spain", 2),
+        ("soccer_italy_serie_a", "Serie A", "Italy", 3),
+        ("soccer_germany_bundesliga", "Bundesliga", "Germany", 4),
+        ("soccer_france_ligue_one", "Ligue 1", "France", 5),
+        ("soccer_netherlands_eredivisie", "Eredivisie", "Netherlands", 7),
+        ("soccer_portugal_primeira_liga", "Primeira Liga", "Portugal", 8),
+        ("soccer_turkey_super_league", "Super Lig", "Turkey", 9),
+        ("soccer_usa_mls", "MLS", "USA", 10),
+        ("soccer_brazil_campeonato", "Serie A (Brazil)", "Brazil", 11),
+        ("soccer_mexico_ligamx", "Liga MX", "Mexico", 12),
+    ]
+    live_n = 0
+    odds_key = _resolve_key("")
+    if odds_key:
+        from .bestbets import resolve_team
+        from .scanner import BASE as ODDS_BASE
+        for sport, lgname, country, rank in _ODDS_FIXTURE_SPORTS:
+            try:
+                r2 = requests.get(f"{ODDS_BASE}/sports/{sport}/events",
+                                  params={"apiKey": odds_key}, timeout=8)
+                if r2.status_code != 200:
+                    continue
+                for ev in r2.json() or []:
+                    ct = ev.get("commence_time")
+                    if not ct:
+                        continue
+                    kod = _utc_to_london(datetime.strptime(ct[:16], "%Y-%m-%dT%H:%M"))
+                    if kod < now - timedelta(hours=3) or kod > horizon:
+                        continue
+                    hid = resolve_team(store, ev.get("home_team") or "", "club")
+                    aid = resolve_team(store, ev.get("away_team") or "", "club")
+                    if not hid or not aid or hid == aid:
+                        continue
+                    before = len(out)
+                    _push(hid, aid, kod, lgname, country, None, rank)
+                    live_n += len(out) - before
+            except Exception:  # noqa: BLE001
+                continue
+
     have_pl = any(f["league"] == "Premier League" for f in out)
-    note = "Confirmed fixtures from the leagues this model is built on."
+    note = ("Live listings straight from the sportsbooks, refreshed continuously."
+            if live_n else "Confirmed fixtures from the leagues this model is built on.")
     # Between rounds the main feed goes quiet (sometimes only partially: it can
     # hold a stray midweek game while missing the whole next PL round). Fall back
     # to the official Premier League schedule whenever no PL fixture surfaced,
@@ -1406,7 +1453,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                       "Premier League", "England", None, 1)
         except Exception:  # noqa: BLE001
             pass
-    if primary_n < 5:
+    if len(out) < 5:
         # other big leagues: the free schedule source lists the next confirmed
         # match per league — thin, but keeps the rail worldwide between rounds
         _TSDB_LEAGUES = [("4335", "La Liga", "Spain"), ("4332", "Serie A", "Italy"),
@@ -1444,11 +1491,8 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     _push(hid, aid, kod, lgname, country, None, 2)
             except Exception:  # noqa: BLE001
                 continue
-    if len(out) > primary_n:
-        note = ("The main fixtures feed is unreachable right now, so confirmed "
-                "league schedules fill in." if not text else
-                "The odds feed is between rounds, so confirmed league schedules "
-                "fill the gaps.")
+    if len(out) > primary_n + live_n:
+        note += " Confirmed league schedules fill the remaining gaps."
     out.sort(key=lambda f: (f["kickoff"], f["rank"]))   # soonest first, all leagues mixed
     payload = {"fixtures": out[:limit], "count": len(out), "note": note}
     if out:   # a total source blackout shouldn't pin an empty rail for the TTL

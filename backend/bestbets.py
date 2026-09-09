@@ -60,6 +60,12 @@ def candidate_sports(store: Store, sel_home: str, sel_away: str) -> list[str]:
 
 ODDSAPI_ALIASES = {
     "manchesterunited": "man-united", "manchestercity": "man-city",
+    "hullcity": "hull", "ipswichtown": "ipswich", "leicestercity": "leicester",
+    "norwichcity": "norwich", "coventrycity": "coventry", "derbycounty": "derby",
+    "stokecity": "stoke", "swanseacity": "swansea", "cardiffcity": "cardiff",
+    "westbromwichalbion": "west-brom", "sheffieldwednesday": "sheffield-weds",
+    "queensparkrangers": "qpr", "prestonnorthend": "preston",
+    "blackburnrovers": "blackburn", "bristolcity": "bristol-city",
     "newcastleunited": "newcastle", "wolverhamptonwanderers": "wolves",
     "tottenhamhotspur": "tottenham", "westhamunited": "west-ham",
     "brightonandhovealbion": "brighton", "nottinghamforest": "nott-m-forest",
