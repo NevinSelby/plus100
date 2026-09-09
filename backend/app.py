@@ -45,13 +45,23 @@ warmup = {"ready": False, "error": None, "since": time.time()}
 
 def _warm_up() -> None:
     global store
-    try:
-        store = get_store()
-        warmup["ready"] = True
-        from .refresher import start_background
-        start_background()
-    except Exception as e:  # noqa: BLE001
-        warmup["error"] = str(e)[:300]
+    # A failed build (a data source down mid-boot, a transient network hole)
+    # must not leave the service dead until someone restarts it: keep retrying
+    # with growing pauses. The bootstrap downloader skips files it already has,
+    # so each retry only re-fetches what is still missing.
+    delay = 60
+    while True:
+        try:
+            store = get_store()
+            warmup["ready"] = True
+            warmup["error"] = None
+            from .refresher import start_background
+            start_background()
+            return
+        except Exception as e:  # noqa: BLE001
+            warmup["error"] = f"{str(e)[:250]} (retrying in {delay}s)"
+            time.sleep(delay)
+            delay = min(delay * 2, 900)
 
 
 from .refresher import REFRESH_HOURS  # noqa: E402
