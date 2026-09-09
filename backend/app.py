@@ -1327,7 +1327,9 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
         r.raise_for_status()
         text = r.content.decode("utf-8-sig", errors="replace")
     except Exception:  # noqa: BLE001
-        raise HTTPException(503, "The fixtures feed is not answering right now; try again in a minute.")
+        # the primary feed being down must not empty the rail: treat it like a
+        # quiet week and let the FPL + league-schedule fallbacks fill in
+        text = ""
 
     by_name = {norm_key(reg["name"]): tid for tid, reg in store.registry.items()
                if reg["scope"] == "club"}
@@ -1443,9 +1445,12 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
             except Exception:  # noqa: BLE001
                 continue
     if len(out) > primary_n:
-        note = ("The odds feed is between rounds, so confirmed league schedules "
+        note = ("The main fixtures feed is unreachable right now, so confirmed "
+                "league schedules fill in." if not text else
+                "The odds feed is between rounds, so confirmed league schedules "
                 "fill the gaps.")
     out.sort(key=lambda f: (f["kickoff"], f["rank"]))   # soonest first, all leagues mixed
     payload = {"fixtures": out[:limit], "count": len(out), "note": note}
-    _fixtures_cache[key] = (time.time(), payload)
+    if out:   # a total source blackout shouldn't pin an empty rail for the TTL
+        _fixtures_cache[key] = (time.time(), payload)
     return payload
