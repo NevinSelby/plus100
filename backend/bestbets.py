@@ -11,6 +11,7 @@ market-respecting probability estimate.
 from __future__ import annotations
 
 import difflib
+import re
 import statistics
 
 import requests
@@ -93,36 +94,80 @@ ODDSAPI_ALIASES = {
     "losangelesgalaxy": "los-angeles-galaxy", "lagalaxy": "los-angeles-galaxy",
     "losangelesfc": "los-angeles-fc", "atlantaunited": "atlanta-utd",
     "stlouiscity": "st-louis-city", "intermiamicf": "inter-miami",
+    "atleticosanluis": "atl-san-luis", "atleticomineiro": "atletico-mg",
+    "atleticoparanaense": "athletico-pr", "fortunasittard": "for-sittard",
+    "vitoriasc": "guimaraes", "vitoriaguimaraes": "guimaraes", "tigres": "tigres-uanl",
+    "amedsk": "amedspor", "erzurumbb": "erzurumspor", "basaksehir": "buyuksehyr",
+    "istanbulbasaksehir": "buyuksehyr", "atlantaunitedfc": "atlanta-utd",
 }
 
 
-def resolve_team(store: Store, name: str, scope: str) -> str | None:
+_CLUB_TOKENS = {"fc", "cf", "sc", "ac", "as", "rc", "ca", "cs", "cp", "bc", "jk", "sk", "afc",
+                "fsv", "vfb", "sv", "tsg", "ud", "sd", "us", "fk", "club", "cd", "de", "deportivo",
+                "1", "04", "05", "09", "1899", "enschede"}
+
+
+def _bare(name: str) -> str:
+    """A club name without its legal-form furniture: '1. FC Köln' -> 'koln'."""
+    toks = [t for t in re.split(r"[\s.\-]+", str(name).lower()) if t and t not in _CLUB_TOKENS]
+    return norm_key(" ".join(toks)) or norm_key(name)
+
+
+def _match_in_pool(pool: dict, name: str) -> str | None:
+    """Exact, then bare-name exact, then containment, then a close fuzzy match —
+    all inside ONE pool (a scope, optionally narrowed to one league)."""
+    k = norm_key(name)
+    for tid, (nk, _bk) in pool.items():
+        if nk == k:
+            return tid
+    bk = _bare(name)
+    hits = [tid for tid, (_nk, pb) in pool.items() if pb == bk]
+    if len(hits) == 1:
+        return hits[0]
+    if len(bk) >= 5:
+        cont = [(tid, pb) for tid, (_nk, pb) in pool.items()
+                if len(pb) >= 5 and (bk in pb or pb in bk)]
+        if len(cont) == 1:
+            return cont[0][0]
+        if len(cont) > 1:          # 'atletico' is in many names: keep the tightest fit
+            cont.sort(key=lambda t: abs(len(t[1]) - len(bk)))
+            if abs(len(cont[0][1]) - len(bk)) < abs(len(cont[1][1]) - len(bk)):
+                return cont[0][0]
+    close = difflib.get_close_matches(k, [nk for nk, _ in pool.values()], n=1, cutoff=0.86)
+    if close:
+        return next(tid for tid, (nk, _) in pool.items() if nk == close[0])
+    return None
+
+
+def resolve_team(store: Store, name: str, scope: str, league: str | None = None) -> str | None:
+    """Map a bookmaker/schedule team name onto our registry id. When the source
+    says which league the match belongs to, resolution is confined to that
+    league's clubs first, and never falls back to a fuzzy guess outside it:
+    that is how Liga MX 'Tigres' once became Argentina's Tigre."""
     k = norm_key(name)
     if k in ODDSAPI_ALIASES:
         tid = ODDSAPI_ALIASES[k]
         return tid if tid in store.registry else None
-    suffix = "@intl" if scope == "intl" else ""
     pools = store.__dict__.setdefault("_name_pools", {})
-    if scope not in pools:      # built once per store; rebuilt with each refresh
-        pools[scope] = {tid: norm_key(r["name"]) for tid, r in store.registry.items()
-                        if r["scope"] == scope and r["active"]}
-    pool = pools[scope]
-    for tid, nk in pool.items():
-        if nk == k:
-            return tid
-    def strip_tokens(x: str) -> str:
-        for tok in ("fc", "cf", "sc", "club", "cd", "deportivo"):
-            x = x.replace(tok, "")
-        return x
-    stripped = strip_tokens(k)
-    if stripped:
-        for tid, nk in pool.items():
-            if strip_tokens(nk) == stripped:
-                return tid
-    close = difflib.get_close_matches(k, list(pool.values()), n=1, cutoff=0.86)
-    if close:
-        return next(tid for tid, nk in pool.items() if nk == close[0])
-    if suffix and (slugged := name.lower().replace(" ", "-") + suffix) in store.registry:
+
+    def pool_for(lg):
+        key = (scope, lg)
+        if key not in pools:       # built once per store; rebuilt with each refresh
+            pools[key] = {tid: (norm_key(r["name"]), _bare(r["name"]))
+                          for tid, r in store.registry.items()
+                          if r["scope"] == scope and r["active"]
+                          and (lg is None or r["league"] == lg)}
+        return pools[key]
+
+    if league:
+        hit = _match_in_pool(pool_for(league), name)
+        if hit:
+            return hit
+        return next((tid for tid, (nk, _) in pool_for(None).items() if nk == k), None)
+    hit = _match_in_pool(pool_for(None), name)
+    if hit:
+        return hit
+    if scope == "intl" and (slugged := name.lower().replace(" ", "-") + "@intl") in store.registry:
         return slugged
     return None
 

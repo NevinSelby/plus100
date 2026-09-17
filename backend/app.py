@@ -1351,11 +1351,15 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
     out = []
     seen: set[tuple] = set()   # (home_id, away_id): a rescheduled match shows once
 
+    by_pair: dict[tuple, dict] = {}
+
     def _push(hid, aid, ko_london, league, country, odds, rank):
         if (hid, aid) in seen:
+            if odds and not by_pair[(hid, aid)].get("odds"):
+                by_pair[(hid, aid)]["odds"] = odds     # a later source adds prices only
             return
         seen.add((hid, aid))
-        out.append({
+        by_pair[(hid, aid)] = {
             "home_id": hid, "away_id": aid,
             "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
             "home_elo": store.registry[hid]["elo_global"],
@@ -1364,55 +1368,33 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
             "kickoff": _iso_uk(ko_london),
             "kicked_off": ko_london <= now,
             "odds": odds, "rank": rank,
-        })
+        }
+        out.append(by_pair[(hid, aid)])
 
-    for row in csv.DictReader(_io.StringIO(text)):
-        div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
-        if not div or not hn or not an:
-            continue
-        try:
-            ko = datetime.strptime(f"{row['Date']} {row.get('Time') or '15:00'}",
-                                   "%d/%m/%Y %H:%M")
-        except (ValueError, KeyError):
-            continue
-        if ko < now - timedelta(hours=3) or ko > horizon:
-            continue
-        hid, aid = by_name.get(norm_key(hn)), by_name.get(norm_key(an))
-        if not hid or not aid:
-            continue
-        league, country = LEAGUE_NAMES.get(div, (div, ""))
-        try:
-            odds = {"home": float(row["AvgH"]), "draw": float(row["AvgD"]),
-                    "away": float(row["AvgA"])}
-        except (TypeError, ValueError, KeyError):
-            odds = None
-        _push(hid, aid, ko, league, country, odds, _DIV_RANK.get(div, 20))
-
-    primary_n = len(out)
 
     # ---- live layer: the odds service's events listing. Bookmaker-grade,
     # continuously updated, and its events endpoint costs ZERO quota credits —
     # so the rail is genuinely live even when the historical feed is quiet/down.
     _ODDS_FIXTURE_SPORTS = [
-        ("soccer_epl", "Premier League", "England", 1),
-        ("soccer_efl_champ", "Championship", "England", 6),
-        ("soccer_spain_la_liga", "La Liga", "Spain", 2),
-        ("soccer_italy_serie_a", "Serie A", "Italy", 3),
-        ("soccer_germany_bundesliga", "Bundesliga", "Germany", 4),
-        ("soccer_france_ligue_one", "Ligue 1", "France", 5),
-        ("soccer_netherlands_eredivisie", "Eredivisie", "Netherlands", 7),
-        ("soccer_portugal_primeira_liga", "Primeira Liga", "Portugal", 8),
-        ("soccer_turkey_super_league", "Super Lig", "Turkey", 9),
-        ("soccer_usa_mls", "MLS", "USA", 10),
-        ("soccer_brazil_campeonato", "Serie A (Brazil)", "Brazil", 11),
-        ("soccer_mexico_ligamx", "Liga MX", "Mexico", 12),
+        ("soccer_epl", "E0", "Premier League", "England", 1),
+        ("soccer_efl_champ", "E1", "Championship", "England", 6),
+        ("soccer_spain_la_liga", "SP1", "La Liga", "Spain", 2),
+        ("soccer_italy_serie_a", "I1", "Serie A", "Italy", 3),
+        ("soccer_germany_bundesliga", "D1", "Bundesliga", "Germany", 4),
+        ("soccer_france_ligue_one", "F1", "Ligue 1", "France", 5),
+        ("soccer_netherlands_eredivisie", "N1", "Eredivisie", "Netherlands", 7),
+        ("soccer_portugal_primeira_liga", "P1", "Primeira Liga", "Portugal", 8),
+        ("soccer_turkey_super_league", "T1", "Super Lig", "Turkey", 9),
+        ("soccer_usa_mls", "USA", "MLS", "USA", 10),
+        ("soccer_brazil_campeonato", "BRA", "Serie A (Brazil)", "Brazil", 11),
+        ("soccer_mexico_ligamx", "MEX", "Liga MX", "Mexico", 12),
     ]
     live_n = 0
     odds_key = _resolve_key("")
     if odds_key:
         from .bestbets import resolve_team
         from .bestbets import BASE as ODDS_BASE
-        for sport, lgname, country, rank in _ODDS_FIXTURE_SPORTS:
+        for sport, code, lgname, country, rank in _ODDS_FIXTURE_SPORTS:
             try:
                 r2 = requests.get(f"{ODDS_BASE}/sports/{sport}/events",
                                   params={"apiKey": odds_key}, timeout=8)
@@ -1423,17 +1405,50 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     if not ct:
                         continue
                     kod = _utc_to_london(datetime.strptime(ct[:16], "%Y-%m-%dT%H:%M"))
-                    if kod < now - timedelta(hours=3) or kod > horizon:
+                    if kod < now - timedelta(hours=2) or kod > horizon:
                         continue
-                    hid = resolve_team(store, ev.get("home_team") or "", "club")
-                    aid = resolve_team(store, ev.get("away_team") or "", "club")
+                    hid = resolve_team(store, ev.get("home_team") or "", "club", code)
+                    aid = resolve_team(store, ev.get("away_team") or "", "club", code)
                     if not hid or not aid or hid == aid:
                         continue
+                    # bookmakers file cup ties under the league key: if either side
+                    # is not one of this league's clubs, say so instead of lying
+                    in_league = all(store.registry[t]["league"] == code for t in (hid, aid))
                     before = len(out)
-                    _push(hid, aid, kod, lgname, country, None, rank)
+                    if in_league:
+                        _push(hid, aid, kod, lgname, country, None, rank)
+                    else:
+                        _push(hid, aid, kod, "Cup tie", country, None, 15)
                     live_n += len(out) - before
             except Exception:  # noqa: BLE001
                 continue
+
+    def _schedule_rows():
+      for row in csv.DictReader(_io.StringIO(text)):
+          div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
+          if not div or not hn or not an:
+              continue
+          try:
+              ko = datetime.strptime(f"{row['Date']} {row.get('Time') or '15:00'}",
+                                     "%d/%m/%Y %H:%M")
+          except (ValueError, KeyError):
+              continue
+          if ko < now - timedelta(hours=2) or ko > horizon:
+              continue
+          hid, aid = by_name.get(norm_key(hn)), by_name.get(norm_key(an))
+          if not hid or not aid:
+              continue
+          league, country = LEAGUE_NAMES.get(div, (div, ""))
+          try:
+              odds = {"home": float(row["AvgH"]), "draw": float(row["AvgD"]),
+                      "away": float(row["AvgA"])}
+          except (TypeError, ValueError, KeyError):
+              odds = None
+          _push(hid, aid, ko, league, country, odds, _DIV_RANK.get(div, 20))
+
+    n_before_schedule = len(out)
+    _schedule_rows()
+    primary_n = len(out) - n_before_schedule
 
     have_pl = any(f["league"] == "Premier League" for f in out)
     note = ("Live listings straight from the sportsbooks, refreshed every half hour."
@@ -1492,7 +1507,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     if not ts:
                         continue
                     kod = _utc_to_london(datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M"))
-                    if kod < now - timedelta(hours=3) or kod > now + timedelta(days=max(days, 12)):
+                    if kod < now - timedelta(hours=2) or kod > now + timedelta(days=max(days, 12)):
                         continue
                     hid = _map_club(ev.get("strHomeTeam") or "")
                     aid = _map_club(ev.get("strAwayTeam") or "")
