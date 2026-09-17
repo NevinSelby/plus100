@@ -14,7 +14,7 @@ from pathlib import Path
 
 import requests
 
-from .data_store import CACHE, DATA, get_store
+from .data_store import CACHE, DATA, EXTRA_LEAGUES, MAIN_LEAGUES, get_store
 
 REFRESH_HOURS = 6
 UA = {"User-Agent": "Mozilla/5.0 (Plus100 refresher)"}
@@ -33,10 +33,6 @@ def _season_codes(today: dt.date) -> list[str]:
     return [prev, cur]
 
 
-MAIN_LEAGUES = ["E0", "E1", "SC0", "SP1", "SP2", "D1", "D2", "I1", "I2",
-                "F1", "F2", "N1", "P1", "B1", "T1", "G1"]
-EXTRA_LEAGUES = ["USA", "BRA", "ARG", "MEX", "JPN", "CHN", "DNK", "NOR",
-                 "SWE", "FIN", "IRL", "POL", "ROU", "RUS", "AUT", "SWZ"]
 INTL_FILES = ["results.csv", "goalscorers.csv", "shootouts.csv"]
 
 
@@ -85,10 +81,14 @@ def refresh_now() -> None:
     state["last_error"] = None
     try:
         changed = refresh_files()
-        if changed or not CACHE.exists():
+        try:
+            from .xg import refresh as refresh_xg      # live xG strengths + scorers
+            changed |= refresh_xg(app_module.store.registry)
+        except Exception as e:  # noqa: BLE001
+            state["last_error"] = f"xg refresh: {e}"
+        if changed:
             CACHE.unlink(missing_ok=True)
-            new_store = get_store(force=True)
-            app_module.store = new_store
+            app_module.store = get_store(force=True)
         state["last_refresh"] = dt.datetime.now().isoformat(timespec="seconds")
     except Exception as e:  # noqa: BLE001 — a failed refresh must never kill the loop
         state["last_error"] = str(e)
@@ -96,22 +96,25 @@ def refresh_now() -> None:
         state["refreshing"] = False
 
 
-def _newest_data_age_hours() -> float:
-    files = list((DATA / "international").glob("*.csv"))
-    if not files:
+def _data_age_days() -> float:
+    """Age of the newest RESULT inside the built store. Content-based on
+    purpose: file mtimes lie after a git clone (every committed file gets the
+    deploy's timestamp), and a fresh deploy of an old data snapshot must still
+    refresh itself immediately."""
+    try:
+        from . import app as app_module
+        latest = app_module.store.matches.date.max()
+        return (dt.date.today() - latest.date()).days
+    except Exception:  # noqa: BLE001
         return 1e9
-    newest = max(f.stat().st_mtime for f in files)
-    return (time.time() - newest) / 3600
 
 
 def start_background() -> None:
     def loop():
-        if _newest_data_age_hours() > REFRESH_HOURS:
+        if _data_age_days() > 2:
             refresh_now()
         else:
-            state["last_refresh"] = dt.datetime.fromtimestamp(
-                max(f.stat().st_mtime for f in (DATA / "international").glob("*.csv"))
-            ).isoformat(timespec="seconds")
+            state["last_refresh"] = dt.datetime.now().isoformat(timespec="seconds")
         while True:
             time.sleep(REFRESH_HOURS * 3600)
             refresh_now()

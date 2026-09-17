@@ -1089,19 +1089,22 @@ function PredictScreen(props) {
   const autoNeutral = (a, b) =>
     setNeutral(!!(a && b && a.scope === "intl" && b.scope === "intl"));
 
+  // crest, colours and today's effective rating arrive after the pick; each
+  // merge is guarded so a late response never overwrites a newer selection
+  const hydrate = (t, set) => {
+    for (const path of ["/api/logo", "/api/teamstate"]) {
+      api(path, { team_id: t.id })
+        .then((info) => set((cur) => (cur && cur.id === t.id ? { ...cur, ...info } : cur)))
+        .catch(() => {});
+    }
+  };
+
   const loadPair = (ht, at) => {
     springy();
     setHome(ht); setAway(at);
     setNeutral(false);              // a listed fixture is a real home game
     setActiveSlot(null);
-    for (const [t, set] of [[ht, setHome], [at, setAway]]) {
-      api("/api/logo", { team_id: t.id })
-        .then((info) => set((cur) => (cur && cur.id === t.id ? { ...cur, ...info } : cur)))
-        .catch(() => {});
-      api("/api/teamstate", { team_id: t.id })
-        .then((st) => set((cur) => (cur && cur.id === t.id ? { ...cur, ...st } : cur)))
-        .catch(() => {});
-    }
+    hydrate(ht, setHome); hydrate(at, setAway);
   };
 
   const pickTeam = (slot, t) => {
@@ -1110,12 +1113,7 @@ function PredictScreen(props) {
     autoNeutral(slot === "home" ? t : home, slot === "home" ? away : t);
     setActiveSlot(slot === "home" && !away ? "away" : null);
     springy();
-    api("/api/logo", { team_id: t.id })
-      .then((info) => set((cur) => (cur && cur.id === t.id ? { ...cur, ...info } : cur)))
-      .catch(() => {});
-    api("/api/teamstate", { team_id: t.id })
-      .then((st) => set((cur) => (cur && cur.id === t.id ? { ...cur, ...st } : cur)))
-      .catch(() => {});
+    hydrate(t, set);
   };
 
   const swapSides = () => {
@@ -1165,7 +1163,7 @@ function PredictScreen(props) {
           <GradientBG id="welcome" from="#1CB258" to="#0B7A38" rounded={20}
             style={{ left: -18, right: -18, top: -18, bottom: -18 }} />
           <View style={{ flex: 1, paddingRight: 10 }}>
-            <Text style={s.bannerKicker}>SEASON 2026-27</Text>
+            <Text style={s.bannerKicker}>{(() => { const d = meta?.data_to ? new Date(meta.data_to) : new Date(); const y = d.getMonth() >= 6 ? d.getFullYear() : d.getFullYear() - 1; return `SEASON ${y}-${String(y + 1).slice(2)}`; })()}</Text>
             <Text style={s.bannerTitle}>Call any match on the planet</Text>
             <Text style={s.bannerSub}>
               <Text style={[TNUM, { fontWeight: "800", color: "#FFFFFF" }]}>
@@ -1740,11 +1738,51 @@ function ModelTeam({ api }) {
 }
 
 /* ================= fantasy premier league ================= */
+function PlayerRow({ p, rank, expanded, onToggle }) {
+return (
+  <Pressable onPress={() => onToggle(p.id)}>
+    <View style={s.fplRow}>
+      <Text style={[s.fplRank, TNUM]}>{rank}</Text>
+      {p.photo ? <Image source={{ uri: p.photo }} style={s.fplFace} />
+        : <View style={[s.fplFace, { backgroundColor: C.panel2 }]} />}
+      <View style={{ flex: 1 }}>
+        <Text style={s.fplName} numberOfLines={1}>
+          {p.name}{p.status === "d" ? "  (doubtful)" : ""}
+        </Text>
+        <Text style={[s.optSub, TNUM]}>
+          {p.team} {p.home ? "vs" : "at"} {p.opp} · £{p.price.toFixed(1)}m · owned {p.owned_pct}%
+        </Text>
+      </View>
+      <View style={{ alignItems: "flex-end" }}>
+        <View style={[s.ptsPill, { backgroundColor: rateColor(p.xpts, 5, 3) }]}>
+          <Text style={[s.ptsPillTxt, TNUM]}>{p.xpts.toFixed(1)}</Text>
+        </View>
+        <Text style={s.tileLabel}>xPts</Text>
+      </View>
+    </View>
+    {expanded === p.id && (
+      <View style={s.fplBreak}>
+        {Object.entries(p.breakdown || {}).map(([k, v]) => (
+          <View key={k} style={s.rowBetween}>
+            <Text style={s.smallLabel}>{k.replace("_", " ")}</Text>
+            <Text style={[s.smallLabel, TNUM, { color: v >= 0 ? C.dim : C.red }]}>
+              {v >= 0 ? "+" : ""}{v}
+            </Text>
+          </View>
+        ))}
+        {!!p.news && <Text style={[s.axisNote, { color: C.amber }]}>{p.news}</Text>}
+      </View>
+    )}
+  </Pressable>
+);
+}
+
 function FPLScreen({ api, fplId }) {
   const [gw, setGw] = useState(null);
   const [err, setErr] = useState("");
   const [pos, setPos] = useState("MID");
   const [expanded, setExpanded] = useState(null);
+  const toggleRow = (id) => { springy(); setExpanded((cur) => (cur === id ? null : id)); };
   const [team, setTeam] = useState(null);
   const [teamErr, setTeamErr] = useState("");
 
@@ -1773,43 +1811,6 @@ function FPLScreen({ api, fplId }) {
   const diffs = gw.players.filter((p) => p.owned_pct < 10).slice(0, 6);
   const byPos = gw.players.filter((p) => p.pos === pos).slice(0, 8);
 
-  const PlayerRow = ({ p, rank }) => (
-    <Pressable onPress={() => { springy(); setExpanded(expanded === p.id ? null : p.id); }}>
-      <View style={s.fplRow}>
-        <Text style={[s.fplRank, TNUM]}>{rank}</Text>
-        {p.photo ? <Image source={{ uri: p.photo }} style={s.fplFace} />
-          : <View style={[s.fplFace, { backgroundColor: C.panel2 }]} />}
-        <View style={{ flex: 1 }}>
-          <Text style={s.fplName} numberOfLines={1}>
-            {p.name}{p.status === "d" ? "  (doubtful)" : ""}
-          </Text>
-          <Text style={[s.optSub, TNUM]}>
-            {p.team} {p.home ? "vs" : "at"} {p.opp} · £{p.price.toFixed(1)}m · owned {p.owned_pct}%
-          </Text>
-        </View>
-        <View style={{ alignItems: "flex-end" }}>
-          <View style={[s.ptsPill, { backgroundColor: rateColor(p.xpts, 5, 3) }]}>
-            <Text style={[s.ptsPillTxt, TNUM]}>{p.xpts.toFixed(1)}</Text>
-          </View>
-          <Text style={s.tileLabel}>xPts</Text>
-        </View>
-      </View>
-      {expanded === p.id && (
-        <View style={s.fplBreak}>
-          {Object.entries(p.breakdown).map(([k, v]) => (
-            <View key={k} style={s.rowBetween}>
-              <Text style={s.smallLabel}>{k.replace("_", " ")}</Text>
-              <Text style={[s.smallLabel, TNUM, { color: v >= 0 ? C.dim : C.red }]}>
-                {v >= 0 ? "+" : ""}{v}
-              </Text>
-            </View>
-          ))}
-          {!!p.news && <Text style={[s.axisNote, { color: C.amber }]}>{p.news}</Text>}
-        </View>
-      )}
-    </Pressable>
-  );
-
   return (
     <ScrollView contentContainerStyle={s.scroll}>
       <Text style={s.h2}>Fantasy · {gw.name}</Text>
@@ -1835,7 +1836,7 @@ function FPLScreen({ api, fplId }) {
 
       <Card>
         <SectionTitle icon="star">Captain picks <Text style={s.secNote}>doubled points</Text></SectionTitle>
-        {captains.map((p, i) => <PlayerRow key={p.id} p={p} rank={i + 1} />)}
+        {captains.map((p, i) => <PlayerRow expanded={expanded} onToggle={toggleRow} key={p.id} p={p} rank={i + 1} />)}
       </Card>
 
       <Card>
@@ -1847,13 +1848,13 @@ function FPLScreen({ api, fplId }) {
             </Pressable>
           ))}
         </View>
-        {byPos.map((p, i) => <PlayerRow key={p.id} p={p} rank={i + 1} />)}
+        {byPos.map((p, i) => <PlayerRow expanded={expanded} onToggle={toggleRow} key={p.id} p={p} rank={i + 1} />)}
       </Card>
 
       <Card>
         <SectionTitle icon="eye-off" note="under 10% owned">Differentials</SectionTitle>
         <Text style={s.dimTxt}>Strong projected scores that most managers don't have. When they pay off, you climb.</Text>
-        {diffs.map((p, i) => <PlayerRow key={p.id} p={p} rank={i + 1} />)}
+        {diffs.map((p, i) => <PlayerRow expanded={expanded} onToggle={toggleRow} key={p.id} p={p} rank={i + 1} />)}
       </Card>
 
       <Card>
@@ -1890,11 +1891,11 @@ function FPLScreen({ api, fplId }) {
                 </Text>
               </View>
             )}
-            {team.squad.slice(0, 15).map((p, i) => <PlayerRow key={p.id} p={p} rank={i + 1} />)}
+            {team.squad.slice(0, 15).map((p, i) => <PlayerRow expanded={expanded} onToggle={toggleRow} key={p.id} p={p} rank={i + 1} />)}
             {team.upgrade_ideas?.length > 0 && (
               <>
                 <SectionTitle icon="trending-up">Upgrade ideas</SectionTitle>
-                {team.upgrade_ideas.map((p, i) => <PlayerRow key={p.id} p={p} rank={i + 1} />)}
+                {team.upgrade_ideas.map((p, i) => <PlayerRow expanded={expanded} onToggle={toggleRow} key={p.id} p={p} rank={i + 1} />)}
               </>
             )}
           </>
@@ -1982,7 +1983,7 @@ function SettingsScreen({ server, oddsFormat, bankroll, fplId, saveSettings, met
         <InfoRow label="matches in database" value={meta ? meta.matches.toLocaleString() : "–"} />
         <InfoRow label="model accuracy (latest test)"
           value={meta?.live_eval ? `${(meta.live_eval.model_accuracy * 100).toFixed(1)}%` : "–"} />
-        <InfoRow label="data refresh" value="automatic, every 6 hours" />
+        <InfoRow label="data refresh" value={meta?.refresh?.auto ? `automatic, ${meta.refresh.auto}` : "automatic"} />
       </Card>
 
       <Card>

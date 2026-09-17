@@ -164,7 +164,7 @@ function wireSlot(id, key) {
   document.addEventListener("click", (e) => { if (!slot.contains(e.target)) dd.hidden = true; });
 }
 const logoWaits = {};
-function pickTeam(key, t, keepNeutral) {
+function pickTeam(key, t, keepNeutral, hydrated) {
   S[key] = t;
   const slot = $(key === "home" ? "#slot-home" : "#slot-away");
   $("input", slot).value = t.name;
@@ -177,6 +177,7 @@ function pickTeam(key, t, keepNeutral) {
   updateGo(); sweepLabel(); updateSwap();
   if (S.home && S.away && !keepNeutral)   // real home fixture unless country vs country
     $("#neutral").checked = S.home.scope === "intl" && S.away.scope === "intl";
+  if (hydrated) { logoWaits[key] = Promise.resolve(); return; }   // swap: nothing new to fetch
   logoWaits[key] = api("/api/logo", { team_id: t.id }).then(info => {
     Object.assign(t, info);
     if (S[key] !== t) return;       // user re-picked while this was in flight
@@ -207,7 +208,7 @@ $("#swap").onclick = () => {
   if (!S.home || !S.away) return;
   const keepNeutral = $("#neutral").checked;
   const a = S.home, b = S.away;
-  pickTeam("home", b, true); pickTeam("away", a, true);
+  pickTeam("home", b, true, true); pickTeam("away", a, true, true);
   $("#neutral").checked = keepNeutral;   // switching venue roles, not the venue type
   if (S.prediction) predictNow();
 };
@@ -217,6 +218,9 @@ async function loadFixtures() {
   const box = $("#fixtures");
   try {
     const d = await api("/api/fixtures/upcoming", { days: 8, limit: 26, _: Date.now() });
+    const sig = JSON.stringify(d.fixtures);
+    if (sig === S.fixturesSig) return;     // identical payload: leave the rail alone
+    S.fixturesSig = sig;
     box.innerHTML = "";
     $("#fxnote").textContent = d.fixtures.length + (d.count > d.fixtures.length ? ` of ${d.count}` : "") + " matches";
     if (!d.fixtures.length) { box.append(h("div", "mini", "No confirmed fixtures in the feed right now — between rounds this list can be empty.")); return; }
@@ -351,7 +355,7 @@ function pitchHTML(lu, kh, ka) {
       const pill = pl.p_score != null
         ? `<span class="pill" style="background:${rateColor(pl.p_score, .25, .12)}">${Math.round(pl.p_score * 100)}%</span>` : "";
       dots += `<div class="pdot" style="left:${x}%;top:${y}%" title="${esc(pl.name)} — ${esc(pl.pos)}${pl.p_score != null ? " · scores " + Math.round(pl.p_score*100) + "% of the time" : ""}">
-        <div class="face" style="border-color:${color}">${pl.img ? `<img src="${esc(pl.img)}" onerror="this.replaceWith('${esc(initialsOf(pl.name))}')">` : esc(initialsOf(pl.name))}</div>
+        <div class="face" style="border-color:${color}">${pl.img ? `<img loading="lazy" decoding="async" src="${esc(pl.img)}" onerror="this.replaceWith('${esc(initialsOf(pl.name))}')">` : esc(initialsOf(pl.name))}</div>
         ${pill}<div class="nm">${esc(lastName(pl.name))}</div></div>`;
     });
   };
@@ -407,7 +411,7 @@ function renderPrediction(out, p, hh, lu) {
       <div class="hbar"><div style="width:${prob * 100}%;background:${col}"></div></div>
       <span class="val">${pct(prob)}</span></div>`;
     return `<div class="duo">
-      <div class="card"><h3 class="sec">${ICONS.zap || ICONS.clock} First team to score</h3>
+      <div class="card"><h3 class="sec">${ICONS.target} First team to score</h3>
         ${bar(p.home.name, fg.home, "var(--green)")}${bar(p.away.name, fg.away, "#4D9FDB")}${bar("Neither (0-0)", fg.none, "#9AA69C")}
         <div class="mini">Who breaks the deadlock, from each side's share of the expected goals.</div></div>
       <div class="card"><h3 class="sec">${ICONS.clock} At half-time</h3>
@@ -423,7 +427,6 @@ function renderPrediction(out, p, hh, lu) {
       <div class="card"><h3 class="sec">${ICONS.grid} Winning margin <span class="note">how far apart they finish</span></h3>
         ${(() => {
           const mg = p.markets.margins;
-          if (!mg) return `<div class="scores">${p.markets.correct_scores.slice(0, 4).map(cs => `<div class="sc"><b>${esc(cs.score)}</b><span>${pct(cs.prob)}</span></div>`).join("")}</div>`;
           const rows = [
             [`${p.home.name} by 2+`, mg.home_by_2_plus, "var(--green)"],
             [`${p.home.name} by 1`, mg.home_by_1, "var(--green)"],
@@ -623,7 +626,7 @@ function renderFPL(out) {
     : "held — no swap cleared the bar, the free transfer banks for next week";
   const table = (list, title) => `<h3 class="sec">${title}</h3><table>
     <tr><th></th><th>Player</th><th>Fixture</th><th class="num">Price</th><th class="num">xPts</th></tr>
-    ${list.map(p => `<tr><td>${p.photo ? `<img class="face-s" src="${esc(p.photo)}" onerror="this.remove()">` : ""}</td>
+    ${list.map(p => `<tr><td>${p.photo ? `<img class="face-s" loading="lazy" decoding="async" src="${esc(p.photo)}" onerror="this.remove()">` : ""}</td>
       <td><b>${esc(p.name)}</b> <span class="mini">${esc(p.pos)}</span></td>
       <td class="mini">${esc(p.team)} ${p.home ? "vs" : "at"} ${esc(p.opp)}</td>
       <td class="num">£${p.price.toFixed(1)}m</td>
@@ -651,7 +654,7 @@ function renderFPL(out) {
         </svg>${dots}
       </div>
       <div class="bench"><span class="mini" style="margin-top:0">bench</span>
-        ${bench.map(p => `<div class="bp">${p.photo ? `<img src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price.toFixed(1)}m</div></div>`).join("")}</div>
+        ${bench.map(p => `<div class="bp">${p.photo ? `<img loading="lazy" decoding="async" src="${esc(p.photo)}" onerror="this.remove()">` : ""}<div>${esc(p.name)}</div><div>£${p.price.toFixed(1)}m</div></div>`).join("")}</div>
       ${t.scores.length ? `<div class="mini" style="margin-top:8px">Finished rounds: ${t.scores.map(s => `GW${s.gw}: <b>${s.points}</b>`).join(" · ")}</div>` : ""}
       <div class="mini" style="margin-top:8px">${esc(t.note)}${t.durable ? "" : " (Warning: durable storage is not connected on this server, so history resets on restart.)"}</div>
     </div>

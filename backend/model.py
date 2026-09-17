@@ -19,6 +19,7 @@ import numpy as np
 from .data_store import Store
 
 MAX_GOALS = 10
+_FACT = np.array([math.factorial(i) for i in range(MAX_GOALS + 1)], dtype=float)
 DC_RHO = -0.10          # Dixon-Coles low-score correlation
 ELO_HOME_ADV_CLUB = 60.0   # matches the HA used when pre_elo_diff was built
 ELO_HOME_ADV_INTL = 55.0
@@ -38,8 +39,8 @@ def dc_tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
 
 def score_matrix(lh: float, la: float, rho: float = DC_RHO) -> np.ndarray:
     g = np.arange(MAX_GOALS + 1)
-    ph = np.exp(-lh) * lh ** g / np.array([math.factorial(i) for i in g])
-    pa = np.exp(-la) * la ** g / np.array([math.factorial(i) for i in g])
+    ph = np.exp(-lh) * lh ** g / _FACT
+    pa = np.exp(-la) * la ** g / _FACT
     mat = np.outer(ph, pa)
     for x in (0, 1):
         for y in (0, 1):
@@ -207,8 +208,7 @@ def likely_scorers(store: Store, team_name: str, team_lambda: float) -> list[dic
         share = r.wgoals / total
         share *= 0.85  # some goals go to players outside the recent-scorer list
         p = 1 - math.exp(-team_lambda * share)
-        out.append({"player": r.scorer, "recent_goals": int(r.goals_2y),
-                    "prob_to_score": round(p, 3), "fair_odds": fair(p)})
+        out.append({"player": r.scorer, "prob_to_score": round(p, 3), "fair_odds": fair(p)})
     return out
 
 
@@ -218,11 +218,7 @@ def likely_scorers_club(store: Store, tid: str, team_lambda: float) -> list[dict
     out = []
     for r in store.player_rates.get(tid, [])[:8]:
         p = 1 - math.exp(-team_lambda * r["xg_share"] * 0.92)
-        out.append({"player": r["player"], "recent_goals": r["recent_goals"],
-                    "recent_xg": r["recent_xg"], "apps": r.get("apps"),
-                    "xg_per_match": r.get("xg_per_match"),
-                    "sot_rate": r.get("sot_rate", 0),
-                    "prob_to_score": round(p, 3), "fair_odds": fair(p)})
+        out.append({"player": r["player"], "prob_to_score": round(p, 3), "fair_odds": fair(p)})
     return out
 
 
@@ -256,27 +252,17 @@ FIRST_HALF_GOAL_SHARE = 0.456   # empirical share of goals scored before HT
 N_SIMS = 150_000
 
 
-def _team_extras(store: Store, tid: str, side: str) -> dict:
-    lg = store.extras_league
-    base = store.team_extras.get(tid)
-    if base:
-        return base
-    return {"cf": lg[f"corners_{side}"], "ca": lg[f"corners_{'away' if side == 'home' else 'home'}"],
-            "cards": lg[f"cards_{side}"]}
-
-
-def _player_share(store: Store, tid: str, reg: dict, player: str) -> tuple[float, float] | None:
-    """(goal share of team goals, shots-on-target per match) for a player."""
+def _player_share(store: Store, tid: str, reg: dict, player: str) -> float | None:
+    """A player's share of his team's goals, or None if unknown."""
     for r in store.player_rates.get(tid, []):
         if r["player"] == player:
-            return r["xg_share"] * 0.92, r.get("sot_rate") or 0.0
+            return r["xg_share"] * 0.92
     if reg["scope"] == "intl":
         sg = store.scorer_goals
         rows = sg[sg.team == reg["name"]]
         if not rows.empty and player in set(rows.scorer):
             total = rows.wgoals.sum()
-            share = float(rows[rows.scorer == player].wgoals.iloc[0]) / total * 0.85
-            return share, 0.0
+            return float(rows[rows.scorer == player].wgoals.iloc[0]) / total * 0.85
     return None
 
 
@@ -287,10 +273,9 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
     """Same-game parlay joint probability via Monte Carlo over the score matrix.
 
     Scorelines are drawn from the calibrated Dixon-Coles matrix (exact);
-    goal timing, corners, cards and player events are layered on with
-    documented approximations (timing uniform w/ empirical half split,
-    corners/cards Poisson from team rates, player goals thinned from team
-    goals by xG share, player SoT Poisson scaled with match expectation).
+    half-time splits and scorer legs are layered on with documented
+    approximations (goals split by the empirical first-half share, player
+    goals thinned from team goals by xG share).
     """
     rng = np.random.default_rng(20260715)
     rh, ra = store.registry[home], store.registry[away]
@@ -325,27 +310,6 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
             sims["first_home"] = (tot > 0) & (r < p_home_first)
             sims["first_away"] = (tot > 0) & ~sims["first_home"]
             sims["first"] = True
-        elif kind == "corners":
-            exh = _team_extras(store, home, "home")
-            exa = _team_extras(store, away, "away")
-            lg = store.extras_league
-            # attacking tilt nudges corner expectation toward the stronger side.
-            # Home sides win ~54% of corners empirically; the old 0.4+0.55*tilt
-            # curve handed them ~67%+ and inflated every home-corners-over leg.
-            tilt = lh / (lh + la)
-            base_total = (exh["cf"] + exa["ca"]) / 2 + (exa["cf"] + exh["ca"]) / 2
-            home_share = (0.5 if neutral else 0.54) + 0.35 * (tilt - 0.5)
-            mu_h = base_total * min(max(home_share, 0.30), 0.75)
-            mu_a = base_total - mu_h
-            sims["ch"] = rng.poisson(max(mu_h, 0.5), n)
-            sims["ca_"] = rng.poisson(max(mu_a, 0.5), n)
-            sims["corners"] = True
-        elif kind == "cards":
-            exh = _team_extras(store, home, "home")
-            exa = _team_extras(store, away, "away")
-            sims["cards_h"] = rng.poisson(max(exh["cards"], 0.3), n)
-            sims["cards_a"] = rng.poisson(max(exa["cards"], 0.3), n)
-            sims["cards"] = True
 
     def player_goals(side: str, player: str) -> np.ndarray:
         key = f"pg:{side}:{player}"
@@ -356,21 +320,7 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
             sh = _player_share(store, tid, reg, player)
             if sh is None:
                 raise ValueError(f"no data for player: {player}")
-            sims[key] = rng.binomial(hg if side == "home" else ag, min(sh[0], 0.95))
-        return sims[key]
-
-    def player_sot(side: str, player: str) -> np.ndarray:
-        key = f"ps:{side}:{player}"
-        if key not in sims:
-            if player in _outs:
-                raise ValueError(f"{player} is flagged out of this match")
-            tid, reg = (home, rh) if side == "home" else (away, ra)
-            sh = _player_share(store, tid, reg, player)
-            if sh is None or sh[1] <= 0:
-                raise ValueError(f"no shots-on-target data for: {player}")
-            lam_typ = 1.35
-            scale = (lh if side == "home" else la) / lam_typ
-            sims[key] = rng.poisson(sh[1] * scale, n)
+            sims[key] = rng.binomial(hg if side == "home" else ag, min(sh, 0.95))
         return sims[key]
 
     def eval_leg(leg: str) -> tuple[str, np.ndarray]:
@@ -424,43 +374,22 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
                 return "No goals", hg + ag == 0
             return (f"{nm[p[1]]} scores first",
                     sims["first_home"] if p[1] == "home" else sims["first_away"])
-        if p[0] in ("corners_o", "corners_u"):      # corners_o:9.5
-            need("corners")
-            line = float(p[1])
-            ctot = sims["ch"] + sims["ca_"]
-            return (f"{'Over' if p[0] == 'corners_o' else 'Under'} {line} corners",
-                    ctot > line if p[0] == "corners_o" else ctot < line)
-        if p[0] in ("cards_o", "cards_u"):          # cards_o:4.5
-            need("cards")
-            line = float(p[1])
-            ctot = sims["cards_h"] + sims["cards_a"]
-            return (f"{'Over' if p[0] == 'cards_o' else 'Under'} {line} cards",
-                    ctot > line if p[0] == "cards_o" else ctot < line)
         if p[0] == "scorer":                        # scorer:home:Mohamed Salah
             side, player = p[1], ":".join(p[2:])
             return f"{player} to score", player_goals(side, player) > 0
-        if p[0] == "sot":                           # sot:home:Salah:2 -> 2+ SoT
-            side, player, k = p[1], ":".join(p[2:-1]), int(p[-1])
-            return f"{player} {k}+ shots on target", player_sot(side, player) >= k
         raise ValueError(f"unknown leg: {leg}")
 
     out_legs = []
     mask = np.ones(n, dtype=bool)
     naive = 1.0
-    approx = False
     for leg in legs:
         label, m = eval_leg(leg)
         pm = float(m.mean())
         naive *= pm
         out_legs.append({"leg": leg, "label": label, "marginal_prob": round(pm, 4)})
         mask &= m
-        if leg.split(":")[0] in ("corners_o", "corners_u", "cards_o", "cards_u", "sot"):
-            approx = True
     joint = float(mask.mean())
     notes = ["Simulated over 150,000 match runs (sampling error ≈ ±0.3%)."]
-    if approx:
-        notes.append("Corners/cards/shots-on-target legs use team-rate models that are "
-                     "approximately independent of the scoreline, so treat those combos as estimates.")
     return {
         "legs": out_legs,
         "joint_prob": round(joint, 4),

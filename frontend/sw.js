@@ -1,8 +1,7 @@
 /* Plus100 service worker: cache the app shell, never cache API responses
    (odds and predictions must always be fresh). */
-const CACHE = "plus100-v24";
-const SHELL = ["/", "/static/style.css?v=24", "/static/app.js?v=24",
-               "/static/manifest.json", "/static/icon-192.png"];
+const CACHE = "plus100-v45";
+const SHELL = ["/", "/static/manifest.json", "/static/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

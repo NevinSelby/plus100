@@ -19,7 +19,6 @@ import numpy as np
 
 from .data_store import Store, norm_key
 from .model import MAX_GOALS, expected_goals, score_matrix
-from .scanner import BASE, _window
 
 # The Odds API sport key -> (scope, is_neutral_venue)
 SPORT_META = {
@@ -58,6 +57,20 @@ def candidate_sports(store: Store, sel_home: str, sel_away: str) -> list[str]:
     return list(SPORT_META)
 
 
+BASE = "https://api.the-odds-api.com/v4"
+
+
+def _window() -> tuple[str, str]:
+    """Now through the end of tomorrow (local), in the UTC ISO format the API wants."""
+    now = dt.datetime.now(dt.timezone.utc)
+    local_tomorrow_end = (dt.datetime.now().astimezone() + dt.timedelta(days=1)) \
+        .replace(hour=23, minute=59, second=59)
+    end = local_tomorrow_end.astimezone(dt.timezone.utc)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return now.strftime(fmt), end.strftime(fmt)
+
+
+
 ODDSAPI_ALIASES = {
     "manchesterunited": "man-united", "manchestercity": "man-city",
     "hullcity": "hull", "ipswichtown": "ipswich", "leicestercity": "leicester",
@@ -89,8 +102,11 @@ def resolve_team(store: Store, name: str, scope: str) -> str | None:
         tid = ODDSAPI_ALIASES[k]
         return tid if tid in store.registry else None
     suffix = "@intl" if scope == "intl" else ""
-    pool = {tid: norm_key(r["name"]) for tid, r in store.registry.items()
-            if r["scope"] == scope and r["active"]}
+    pools = store.__dict__.setdefault("_name_pools", {})
+    if scope not in pools:      # built once per store; rebuilt with each refresh
+        pools[scope] = {tid: norm_key(r["name"]) for tid, r in store.registry.items()
+                        if r["scope"] == scope and r["active"]}
+    pool = pools[scope]
     for tid, nk in pool.items():
         if nk == k:
             return tid

@@ -156,7 +156,6 @@ def next_gameweek(store: Store) -> dict:
             "price": e["now_cost"] / 10, "owned_pct": float(e["selected_by_percent"] or 0),
             "status": e["status"], "news": (e.get("news") or "")[:90],
             "xpts": total, "breakdown": parts,
-            "value": round(total / (e["now_cost"] / 10), 3),
         })
     players.sort(key=lambda p: -p["xpts"])
 
@@ -173,17 +172,24 @@ def next_gameweek(store: Store) -> dict:
     }
 
 
-def club_squad(store: Store, registry_id: str) -> list[dict]:
-    """Full CURRENT squad for a Premier League club from the FPL API — complete,
-    transfer-aware, with availability flags and photos. Empty list for non-PL teams."""
+def _club_fpl(store: Store, registry_id: str):
+    """(bootstrap payload, FPL team id) for a Premier League club, else None."""
     try:
         boot = _get(f"{BASE}/bootstrap-static/")
     except Exception:  # noqa: BLE001
-        return []
+        return None
     tmap = _team_map(store, boot["teams"])
     fpl_id = next((fid for fid, v in tmap.items() if v["registry_id"] == registry_id), None)
-    if fpl_id is None:
+    return None if fpl_id is None else (boot, fpl_id)
+
+
+def club_squad(store: Store, registry_id: str) -> list[dict]:
+    """Full CURRENT squad for a Premier League club from the FPL API — complete,
+    transfer-aware, with availability flags and photos. Empty list for non-PL teams."""
+    hit = _club_fpl(store, registry_id)
+    if not hit:
         return []
+    boot, fpl_id = hit
     out = []
     for e in boot["elements"]:
         if e["team"] != fpl_id:
@@ -206,14 +212,10 @@ def club_unavailable(store: Store, registry_id: str) -> list[dict]:
     """Players flagged unavailable or doubtful by the OFFICIAL live FPL feed for a
     Premier League club: injured/suspended/unavailable status, or a stated chance
     of playing at 50% or less. Updated daily by the league itself."""
-    try:
-        boot = _get(f"{BASE}/bootstrap-static/")
-    except Exception:  # noqa: BLE001
+    hit = _club_fpl(store, registry_id)
+    if not hit:
         return []
-    tmap = _team_map(store, boot["teams"])
-    fpl_id = next((fid for fid, v in tmap.items() if v["registry_id"] == registry_id), None)
-    if fpl_id is None:
-        return []
+    boot, fpl_id = hit
     out = []
     for e in boot["elements"]:
         if e["team"] != fpl_id:

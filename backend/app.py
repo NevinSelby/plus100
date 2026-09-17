@@ -34,6 +34,8 @@ app = FastAPI(title="Plus100 Football Predictor")
 # Read-only public API: allow browser clients (Expo web debugging, the PWA on
 # another origin) to call it. The native app is unaffected by CORS.
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+from fastapi.middleware.gzip import GZipMiddleware  # noqa: E402
+app.add_middleware(GZipMiddleware, minimum_size=1024)   # player lists shrink ~8x
 
 # The model store takes a couple of minutes to build on a cold machine (it
 # downloads the full match history first). Build it in the background so the
@@ -525,7 +527,8 @@ def _tsdb_team(team_id: str) -> dict:
     t = _team_or_404(team_id)
     with _logo_lock:
         cached = _logo_cache.get(team_id)
-    if isinstance(cached, dict) and "colors" in cached:   # old entries lack fields: refetch
+    if (isinstance(cached, dict) and "colors" in cached
+            and time.time() - cached.get("at", 0) < 30 * 86400):   # refetch monthly
         return cached
     entry = {"badge": cached.get("badge") if isinstance(cached, dict) else
              cached if isinstance(cached, str) else None,
@@ -544,6 +547,7 @@ def _tsdb_team(team_id: str) -> dict:
         return entry            # transient failure: do not freeze an empty entry
     if not entry.get("tsdb_name"):
         return entry            # nothing found: retry next time rather than cache
+    entry["at"] = time.time()
     with _logo_lock:
         _logo_cache[team_id] = entry
         LOGO_CACHE_FILE.write_text(json.dumps(_logo_cache))
@@ -1029,16 +1033,15 @@ _usage_dirty = 0
 # `usage_stats()` SQL function; if Supabase is unconfigured or down, it serves
 # the local on-disk aggregates instead.
 
-SB_URL = os.environ.get("SUPABASE_URL", "").rstrip("/")
-SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+from .fpl import _sb_conf, _sb_h  # noqa: E402 — one Supabase config, shared with fpl_state
+SB_URL, SB_KEY = _sb_conf() or ("", "")
 _sb_queue: list[dict] = []
 _sb_lock = threading.Lock()
 _sb_flusher_started = False
 
 
 def _sb_headers() -> dict:
-    return {"apikey": SB_KEY, "Authorization": f"Bearer {SB_KEY}",
-            "Content-Type": "application/json", "Prefer": "return=minimal"}
+    return _sb_h(SB_KEY) | {"Prefer": "return=minimal"}
 
 
 def _sb_log(evt: dict) -> None:
@@ -1298,6 +1301,13 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
     key = f"up:{days}:{limit}"
     hit = _fixtures_cache.get(key)
     if hit and time.time() - hit[0] < _FIXTURES_TTL:
+        from datetime import datetime as _dt, timezone as _tz
+        now_utc = _dt.now(_tz.utc)
+        for f in hit[1]["fixtures"]:         # the in-play flag must not go stale with the cache
+            try:
+                f["kicked_off"] = _dt.fromisoformat(f["kickoff"]) <= now_utc
+            except (TypeError, ValueError):
+                pass
         return hit[1]
 
     import csv
@@ -1401,7 +1411,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
     odds_key = _resolve_key("")
     if odds_key:
         from .bestbets import resolve_team
-        from .scanner import BASE as ODDS_BASE
+        from .bestbets import BASE as ODDS_BASE
         for sport, lgname, country, rank in _ODDS_FIXTURE_SPORTS:
             try:
                 r2 = requests.get(f"{ODDS_BASE}/sports/{sport}/events",
@@ -1426,7 +1436,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                 continue
 
     have_pl = any(f["league"] == "Premier League" for f in out)
-    note = ("Live listings straight from the sportsbooks, refreshed continuously."
+    note = ("Live listings straight from the sportsbooks, refreshed every half hour."
             if live_n else "Confirmed fixtures from the leagues this model is built on.")
     # Between rounds the main feed goes quiet (sometimes only partially: it can
     # hold a stray midweek game while missing the whole next PL round). Fall back

@@ -56,10 +56,6 @@ NON_EURO_LEAGUE_ANCHOR = {
 }
 
 # Understat league file -> our league code
-UNDERSTAT_LEAGUES = {
-    "epl": "E0", "la_liga": "SP1", "bundesliga": "D1",
-    "serie_a": "I1", "ligue_1": "F1", "rfpl": "RUS",
-}
 
 # Understat team name -> football-data.co.uk name, where normalization fails
 UNDERSTAT_ALIASES = {
@@ -143,12 +139,20 @@ def _read_csv(path: Path, **kw) -> pd.DataFrame:
 _CLUB_COLS = {
     "div", "date", "time", "hometeam", "awayteam", "fthg", "ftag",
     "psh", "psd", "psa", "b365h", "b365d", "b365a", "whh", "whd", "wha",
-    "avgh", "avgd", "avga", "hc", "ac", "hy", "ay", "hr", "ar",
+    "avgh", "avgd", "avga",
 }
 _EXTRA_COLS = {
     "country", "league", "season", "date", "time", "home", "away", "hg", "ag",
     "psch", "pscd", "psca", "avgch", "avgcd", "avgca",
 }
+
+
+# the league files the model is built on: bootstrapped at first boot and
+# re-downloaded by the refresher (current + previous season)
+MAIN_LEAGUES = ["E0", "E1", "SC0", "SP1", "SP2", "D1", "D2", "I1", "I2",
+               "F1", "F2", "N1", "P1", "B1", "T1", "G1"]
+EXTRA_LEAGUES = ["USA", "BRA", "ARG", "MEX", "JPN", "CHN", "DNK", "NOR",
+                "SWE", "FIN", "IRL", "POL", "ROU", "RUS", "AUT", "SWZ"]
 
 
 def _wanted(cols: set):
@@ -180,10 +184,6 @@ def load_club_matches() -> pd.DataFrame:
             sub["oddsH"] = pd.to_numeric(df.get(base + "H"), errors="coerce")
             sub["oddsD"] = pd.to_numeric(df.get(base + "D"), errors="coerce")
             sub["oddsA"] = pd.to_numeric(df.get(base + "A"), errors="coerce")
-        # corners and cards (main European league files only)
-        for col, src in (("hc", "HC"), ("ac", "AC"), ("hy", "HY"), ("ay", "AY"),
-                         ("hred", "HR"), ("ared", "AR")):
-            sub[col] = pd.to_numeric(df.get(src), errors="coerce")
         sub["league"] = lg
         sub["season"] = season
         for c in ("home", "away"):
@@ -382,7 +382,7 @@ class Store:
                     "home_id", "away_id", "scope"):
             if col in m.columns:
                 m[col] = m[col].astype("category")
-        for col in ("hg", "ag", "hc", "ac", "hy", "ay", "hred", "ared"):
+        for col in ("hg", "ag"):
             if col in m.columns:
                 m[col] = pd.to_numeric(m[col], errors="coerce").fillna(-1).astype("int16")
         for col in ("oddsH", "oddsD", "oddsA"):
@@ -403,7 +403,6 @@ class Store:
         self._build_registry()
         self._calibrate_leagues()
         self._compute_strengths()
-        self._compute_extras()
         self._load_scorers()
         self._fit_contexts()
         self._live_eval()
@@ -476,39 +475,6 @@ class Store:
         self.attack, self.defence, self.league_stats = compute_strengths(
             self.matches, half_life_days=half_life_days)
 
-    # ---------- corners & cards rates (for parlay simulation) ----------
-    def _compute_extras(self, half_life_days: float = 420.0):
-        m = self.matches
-        # hc/hy were fillna(-1) at load: notna() was always true, letting the -1
-        # sentinel poison every corners/cards average for leagues without the data
-        mm = m[(m.scope == "club") & (m.hc >= 0) & (m.hy >= 0)].copy()
-        now = m.date.max()
-        mm["w"] = 0.5 ** ((now - mm.date).dt.days / half_life_days)
-        mm = mm[mm.w > 0.01]
-        mm["h_cards"] = mm.hy.clip(lower=0) + mm.hred.clip(lower=0)
-        mm["a_cards"] = mm.ay.clip(lower=0) + mm.ared.clip(lower=0)
-        self.extras_league = {
-            "corners_home": float((mm.hc * mm.w).sum() / mm.w.sum()),
-            "corners_away": float((mm.ac * mm.w).sum() / mm.w.sum()),
-            "cards_home": float((mm.h_cards * mm.w).sum() / mm.w.sum()),
-            "cards_away": float((mm.a_cards * mm.w).sum() / mm.w.sum()),
-        }
-        ex: dict[str, dict] = {}
-        for side, cf, ca, cards in (("home_id", "hc", "ac", "h_cards"),
-                                    ("away_id", "ac", "hc", "a_cards")):
-            for tid, g in mm.groupby(side, observed=True):
-                sw = g.w.sum()
-                if sw < 3:
-                    continue
-                r = ex.setdefault(tid, {"cf": 0.0, "ca": 0.0, "cards": 0.0, "n": 0})
-                r["cf"] += float((g[cf] * g.w).sum() / sw)
-                r["ca"] += float((g[ca] * g.w).sum() / sw)
-                r["cards"] += float((g[cards] * g.w).sum() / sw)
-                r["n"] += 1
-        # average home-side and away-side rates where both present
-        self.team_extras = {tid: {k: v / r["n"] for k, v in r.items() if k != "n"}
-                            for tid, r in ex.items() if r["n"] > 0}
-
     # ---------- international goalscorers ----------
     def _load_scorers(self):
         """Recency-weighted goal records (half-life 18 months). Caps/appearance
@@ -535,150 +501,21 @@ class Store:
         self.intl_matches_played = played.to_dict()
 
     # ---------- Understat shot-level xG ----------
-    def _load_xg(self, half_life_days: float = 500.0):
-        """Shot-level xG (Understat via worldfootballR, 2014 -> ~Sep 2025).
-
-        Produces:
-          xg_attack / xg_defence  — time-weighted xG for/against relative to league avg
-          player_rates            — per team: recent players with their share of team xG
-          xg_data_to              — freshness stamp shown in the UI
-        """
-        # Small hosts load a precomputed artifact instead of parsing 570k shots:
-        # the inputs are static (the xG source updates a few times a year), so
-        # this is the same numbers without the memory spike.
+    def _load_xg(self):
+        """xG strengths and scorer shares from the understat-built artifact.
+        backend/xg.py rebuilds it from live data on every refresh cycle."""
+        self.xg_attack, self.xg_defence, self.player_rates = {}, {}, {}
+        self.xg_data_to = None
         pre = DATA / "xg_precomputed.json.gz"
-        if LOW_MEM and pre.exists():
-            import gzip, json as _json
-            with gzip.open(pre, "rt") as fh:
-                blob = _json.load(fh)
-            self.xg_attack = blob["xg_attack"]
-            self.xg_defence = blob["xg_defence"]
-            self.player_rates = blob["player_rates"]
-            self.xg_data_to = blob["xg_data_to"]
-            print(f"[xg] loaded precomputed strengths ({len(self.player_rates)} squads)")
+        if not pre.exists():
             return
+        import gzip, json as _json
+        with gzip.open(pre, "rt") as fh:
+            blob = _json.load(fh)
+        self.xg_attack, self.xg_defence = blob["xg_attack"], blob["xg_defence"]
+        self.player_rates, self.xg_data_to = blob["player_rates"], blob["xg_data_to"]
+        print(f"[xg] loaded strengths to {self.xg_data_to} ({len(self.player_rates)} squads)")
 
-        frames = []
-        for us_lg, code in UNDERSTAT_LEAGUES.items():
-            f = DATA / "understat" / f"{us_lg}_shots.csv"
-            if not f.exists():                       # deployed images ship gzipped
-                f = f.with_suffix(".csv.gz")
-                if not f.exists():
-                    continue
-            # only the columns the strengths and player rates actually need:
-            # the full shot files carry coordinates and metadata we never read,
-            # and loading them all is what pushes peak memory over small hosts
-            df = _read_csv(f, usecols=["date", "xG", "player", "h_a", "result",
-                                       "match_id", "home_team", "away_team"],
-                           dtype={"player": "category", "home_team": "category",
-                                  "away_team": "category", "result": "category",
-                                  "h_a": "category"})
-            df["league"] = code
-            frames.append(df)
-        if not frames:
-            self.xg_attack, self.xg_defence, self.player_rates = {}, {}, {}
-            self.xg_data_to = None
-            return
-        shots = pd.concat(frames, ignore_index=True)
-        del frames
-        shots["date"] = pd.to_datetime(shots.date, errors="coerce")
-        shots = shots.dropna(subset=["date", "xG"])
-        self.xg_data_to = str(shots.date.max().date())
-
-        # map Understat team names -> registry ids
-        club_by_key = {norm_key(r["name"]): tid for tid, r in self.registry.items()
-                       if r["scope"] == "club"}
-
-        def to_tid(name: str):
-            k = norm_key(name)
-            k = norm_key(UNDERSTAT_ALIASES.get(str(name).lower(), "")) or k
-            return club_by_key.get(k)
-
-        team_names = pd.unique(pd.concat([shots.home_team, shots.away_team]))
-        tid_map = {n: to_tid(n) for n in team_names}
-        unmatched = [n for n, t in tid_map.items() if t is None]
-        if unmatched:
-            print(f"[xg] unmatched understat teams ({len(unmatched)}): {unmatched[:12]}")
-        shots["home_id"] = shots.home_team.map(tid_map)
-        shots["away_id"] = shots.away_team.map(tid_map)
-        shots["team_id"] = np.where(shots.h_a == "h", shots.home_id, shots.away_id)
-
-        # per-match team xG totals
-        agg = shots.groupby(["match_id", "league", "home_id", "away_id"], dropna=True, observed=True).apply(
-            lambda g: pd.Series({
-                "date": g.date.iloc[0],
-                "home_xg": g.xG[g.h_a == "h"].sum(),
-                "away_xg": g.xG[g.h_a == "a"].sum(),
-            }), include_groups=False).reset_index()
-
-        now = self.matches.date.max()
-        agg["w"] = 0.5 ** ((now - agg.date).dt.days.clip(lower=0) / half_life_days)
-        agg = agg[agg.w > 0.01]
-
-        xga, xgd = {}, {}
-        for lg, g in agg.groupby("league", observed=True):
-            sw = g.w.sum()
-            avg_h, avg_a = (g.home_xg * g.w).sum() / sw, (g.away_xg * g.w).sum() / sw
-            lam = (avg_h + avg_a) / 2
-            for side, xg_for, xg_ag in (("home_id", "home_xg", "away_xg"),
-                                        ("away_id", "away_xg", "home_xg")):
-                for tid, tg in g.groupby(side, observed=True):
-                    tw = tg.w.sum()
-                    for_r = (tg[xg_for] * tg.w).sum()
-                    ag_r = (tg[xg_ag] * tg.w).sum()
-                    prior = 8.0
-                    a = (for_r + lam * prior) / (tw + prior) / lam
-                    d = (ag_r + lam * prior) / (tw + prior) / lam
-                    xga[tid] = (xga.get(tid, 0) + a) / (2 if tid in xga else 1)
-                    xgd[tid] = (xgd.get(tid, 0) + d) / (2 if tid in xgd else 1)
-        self.xg_attack, self.xg_defence = xga, xgd
-
-        # player scoring rates. Per-appearance xG rate (not raw share), shrunk
-        # toward a low prior for small samples so a two-match hot streak cannot
-        # outrank an established starter, then scaled by availability (how often
-        # the player has featured in the team's recent matches).
-        end = shots.date.max()
-        recent = shots[shots.date >= end - pd.Timedelta(days=450)].copy()
-        recent["w"] = 0.5 ** ((end - recent.date).dt.days / 300.0)
-        recent = recent.dropna(subset=["team_id"])
-        PRIOR_RATE, PRIOR_APPS = 0.08, 4.0   # xG/match prior, pseudo-appearances
-        rates: dict[str, list] = {}
-        for tid, g in recent.groupby("team_id", observed=True):
-            # team appearance mass: one weight per distinct match
-            match_w = g.groupby("match_id", observed=True).w.max()
-            team_w_matches = float(match_w.sum())
-            if team_w_matches <= 0:
-                continue
-            rows = []
-            for player, pg in g.groupby("player", observed=True):
-                if (end - pg.date.max()).days > 200:
-                    continue  # not seen recently -> likely departed
-                pxg = float((pg.xG * pg.w).sum())
-                p_match_w = pg.groupby("match_id", observed=True).w.max()
-                w_apps = float(p_match_w.sum())
-                apps = int(pg.match_id.nunique())
-                goals = int((pg.result == "Goal").sum())
-                sot = float((pg.result.isin(("Goal", "SavedShot")) * pg.w).sum())
-                # shrunk xG-per-appearance, then weight by how often they play
-                rate = (pxg + PRIOR_RATE * PRIOR_APPS) / (w_apps + PRIOR_APPS)
-                avail = min(1.0, w_apps / team_w_matches)
-                rows.append({"player": player, "contrib": rate * avail,
-                             "apps": apps, "recent_goals": goals,
-                             "recent_xg": round(pxg, 2),
-                             "xg_per_match": round(pxg / max(w_apps, 0.5), 2),
-                             "sot_rate": round(sot / max(w_apps, 0.5), 3)})
-            total = sum(r["contrib"] for r in rows)
-            if total <= 0:
-                continue
-            for r in rows:
-                r["xg_share"] = r.pop("contrib") / total
-            rows.sort(key=lambda r: -r["xg_share"])
-            rates[tid] = rows[:10]
-        self.player_rates = rates
-        del shots, recent
-        gc.collect()
-
-    # ---------- match-context scoring environments ----------
     def _fit_contexts(self):
         """Fitted multipliers for how the match context shifts expected goals.
         Fitted from history where possible; research-based estimates are labeled."""
@@ -783,7 +620,7 @@ class Store:
                  ((m.home_id == b) & (m.away_id == a))]
 
 
-STORE_CODE_VERSION = 4  # bump when Store gains new computed attributes
+STORE_CODE_VERSION = 5  # bump when Store gains new computed attributes
 
 
 def _bootstrap_download() -> None:
@@ -795,10 +632,7 @@ def _bootstrap_download() -> None:
     import requests as _rq
 
     ua = {"User-Agent": "Mozilla/5.0 (Plus100 bootstrap)"}
-    main_lg = ["E0", "E1", "SC0", "SP1", "SP2", "D1", "D2", "I1", "I2",
-               "F1", "F2", "N1", "P1", "B1", "T1", "G1"]
-    extra_lg = ["USA", "BRA", "ARG", "MEX", "JPN", "CHN", "DNK", "NOR",
-                "SWE", "FIN", "IRL", "POL", "ROU", "RUS", "AUT", "SWZ"]
+    main_lg, extra_lg = MAIN_LEAGUES, EXTRA_LEAGUES
     today = _dt.date.today()
     last_start = today.year if today.month >= 7 else today.year - 1
     first = max(2000, MIN_YEAR) if MIN_YEAR else 2000
@@ -835,8 +669,8 @@ def get_store(force: bool = False) -> Store:
     if not any((DATA / "club").glob("*.csv")):
         _bootstrap_download()
     files = sorted(DATA.rglob("*.csv"))
-    sig = (STORE_CODE_VERSION, len(files), sum(f.stat().st_size for f in files))
-    if CACHE.exists() and not force:
+    sig = (STORE_CODE_VERSION, LOW_MEM, MIN_YEAR, len(files), sum(f.stat().st_size for f in files))
+    if CACHE.exists() and not force and not LOW_MEM:
         try:
             with open(CACHE, "rb") as fh:
                 cached_sig, store = pickle.load(fh)
