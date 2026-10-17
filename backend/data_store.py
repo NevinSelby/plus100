@@ -378,6 +378,8 @@ def _merge_recent(m: pd.DataFrame) -> pd.DataFrame:
         return m
     try:
         rows = json.loads(f.read_text())
+        if isinstance(rows, dict):
+            rows = rows.get("rows", [])
     except (OSError, ValueError):
         return m
     if not rows:

@@ -38,33 +38,70 @@ RECENT_FILE = DATA / "espn_recent.json"
 
 
 def refresh_recent_results(store) -> bool:
-    """The last ten days of finished matches in every covered league, straight
-    from ESPN, so a result from this afternoon counts tonight even when the
-    weekly history files lag. Written with OUR team names so the store can
-    merge them like any other row. Returns True if the file changed."""
+    """Finished matches in every covered league from the day after the newest
+    stored result up to today, straight from ESPN, so the model is current to
+    the day even when the weekly history files lag or their site is down.
+    Days already fetched are remembered (data/espn_recent.json keeps a ledger),
+    so a refresh only costs the last two days plus anything new. Rows carry OUR
+    team names so the store can merge them like any other result."""
     import json
     from . import espn
     from .bestbets import resolve_team
-    rows = []
     today = dt.date.today()
-    for code in espn.SOCCER_SLUGS:
-        if not any(r["league"] == code for r in store.registry.values()):
-            continue
-        for back in range(10):
-            day = today - dt.timedelta(days=back)
-            for g in espn.soccer_scores(code, day):
+    try:
+        latest = app_store_latest(store)
+    except Exception:  # noqa: BLE001
+        latest = today - dt.timedelta(days=10)
+    start = max(latest - dt.timedelta(days=1), today - dt.timedelta(days=75))
+    ledger = {"done": {}, "rows": []}
+    if RECENT_FILE.exists():
+        try:
+            ledger = json.loads(RECENT_FILE.read_text())
+            if isinstance(ledger, list):            # pre-ledger format
+                ledger = {"done": {}, "rows": ledger}
+        except (OSError, ValueError):
+            pass
+    done = {k: set(v) for k, v in ledger.get("done", {}).items()}
+    rows = [x for x in ledger.get("rows", []) if x.get("date", "") >= start.isoformat()]
+    codes = [c for c in espn.SOCCER_SLUGS if any(r["league"] == c for r in store.registry.values())]
+    changed = False
+    day = start
+    while day <= today:
+        key = day.isoformat()
+        fresh = (today - day).days <= 1          # today/yesterday can still gain results
+        for code in codes:
+            if not fresh and key in done.get(code, set()):
+                continue
+            got = espn.soccer_scores(code, day)
+            if got is None:
+                continue
+            new_rows = []
+            for g in got:
                 hid = resolve_team(store, g["home"], "club", code)
                 aid = resolve_team(store, g["away"], "club", code)
                 if not hid or not aid or hid == aid:
                     continue
-                rows.append({"date": g["date"], "league": code,
-                             "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
-                             "hg": g["hs"], "ag": g["as"]})
-    payload = json.dumps(sorted(rows, key=lambda r: (r["date"], r["home"])))
-    old = RECENT_FILE.read_text() if RECENT_FILE.exists() else ""
-    if payload != old:
-        RECENT_FILE.write_text(payload)
-    return payload != old
+                new_rows.append({"date": g["date"], "league": code,
+                                 "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
+                                 "hg": g["hs"], "ag": g["as"]})
+            before = {(x["date"], x["league"], x["home"], x["away"]) for x in rows}
+            for x in new_rows:
+                if (x["date"], x["league"], x["home"], x["away"]) not in before:
+                    rows.append(x); changed = True
+            if not fresh:
+                done.setdefault(code, set()).add(key)
+        day += dt.timedelta(days=1)
+    payload = {"done": {k: sorted(v) for k, v in done.items()},
+               "rows": sorted(rows, key=lambda x: (x["date"], x["league"], x["home"]))}
+    text = json.dumps(payload)
+    if changed or not RECENT_FILE.exists():
+        RECENT_FILE.write_text(text)
+    return changed
+
+
+def app_store_latest(store) -> dt.date:
+    """Newest result date in the built store (history files + merged recents)."""
+    return store.matches.date.max().date()
 
 
 def _fetch_replace(url: str, dest: Path, timeout: int = 45) -> bool:
