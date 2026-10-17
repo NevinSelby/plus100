@@ -228,6 +228,13 @@ td.num, th.num { text-align: right; }
 .btn:active, .fx:active, .swapbtn:active, .mathbtn:active { transform: scale(.97); }
 h3.sec svg { width: 16px; height: 16px; stroke: var(--muted); flex-shrink: 0; }
 button:focus-visible, .fx:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
+.slot:focus-within { border-color: var(--green); }
+button, .fx { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+h1, h2, h3 { text-wrap: balance; }
+.mathbtn:hover { border-color: #fff; }
+.skip { position: absolute; left: 12px; top: -48px; z-index: 200; background: var(--panel); color: var(--ink);
+  border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; font-weight: 700; }
+.skip:focus { top: 12px; }
 .hero .pct, .hero .draw, .scores b, td.num, .pair .val { font-variant-numeric: tabular-nums; }
 @media (prefers-reduced-motion: reduce) {
   .a-rise, .a-pop, .a-tilt, .ball, .ballshadow { animation: none !important; }
@@ -241,7 +248,7 @@ button:focus-visible, .fx:focus-visible { outline: 2px solid var(--green); outli
 .overlay { position: fixed; inset: 0; background: rgba(10,18,12,.55); z-index: 90;
   display: grid; place-items: center; padding: 24px; }
 .modal { background: var(--panel); border-radius: 18px; max-width: 780px; width: 100%;
-  max-height: 88vh; overflow: auto; padding: 28px 30px; box-shadow: var(--shadow); }
+  max-height: 88vh; overflow: auto; overscroll-behavior: contain; padding: 28px 30px; box-shadow: var(--shadow); }
 .modal h2 { font-size: 21px; letter-spacing: -.4px; margin-bottom: 4px; }
 .modal .step { color: var(--green-deep); font-weight: 800; font-size: 13.5px;
   letter-spacing: .3px; margin: 22px 0 6px; display: flex; align-items: center; gap: 8px; }

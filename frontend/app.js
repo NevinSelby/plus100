@@ -246,6 +246,8 @@ async function loadFixtures() {
          <div class="teams">${esc(f.home)} <span style="color:var(--muted)">v</span> ${esc(f.away)}</div>
          <div class="when">${esc(when)}</div>` +
         (f.odds ? `<div class="odds">books: H ${odds(f.odds.home)} · D ${odds(f.odds.draw)} · A ${odds(f.odds.away)}</div>` : ""));
+      card.tabIndex = 0; card.setAttribute("role", "button");
+      card.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.click(); } };
       card.onclick = () => {
         pickTeam("home", { id: f.home_id, name: f.home, elo: f.home_elo, scope: "club", league: f.league });
         pickTeam("away", { id: f.away_id, name: f.away, elo: f.away_elo, scope: "club", league: f.league });
@@ -488,7 +490,7 @@ function openMath(p) {
   const absences = (p.caveats || []).filter(c => /OUT|unavailable/.test(c));
   const ov = h("div", "overlay");
   ov.innerHTML = `<div class="modal">
-    <button class="x">×</button>
+    <button class="x" aria-label="Close">×</button>
     <h2>How we got these numbers</h2>
     <div class="mini" style="margin-top:0">${esc(p.home.name)} v ${esc(p.away.name)}, in plain words with this match's real values.</div>
 
@@ -717,6 +719,7 @@ function applySport() {
   $("#predict-h1").textContent = nba ? "Call any NBA game" : "Call any match on the planet";
   document.title = nba ? "Plus100 · NBA predictions" : "Plus100 · Football predictions";
   $('meta[name="theme-color"]').content = nba ? "#0C0D11" : "#F2F7F0";
+  document.documentElement.style.colorScheme = nba ? "dark" : "light";
   $("#railtitle").textContent = nba ? "Tipping off soon" : "Kicking off soon";
   $("#fixtures").classList.toggle("card", nba);
   $("#tagline").textContent = nba ? NBA_TAGLINE : FOOTBALL_TAGLINE();
