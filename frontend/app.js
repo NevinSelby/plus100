@@ -109,9 +109,8 @@ $("#nav").addEventListener("click", (e) => {
 });
 
 /* ---- health + meta ---- */
-(async function boot() {
+async function boot() {
   const dot = $("#srvdot"), txt = $("#srvtxt");
-  applySport();   // theme and copy for the chosen sport straight away, even while the server wakes
   for (;;) {
     try {
       const hz = await api("/healthz");
@@ -126,7 +125,7 @@ $("#nav").addEventListener("click", (e) => {
     } catch { txt.textContent = "waking the server…"; }
     await new Promise(r => setTimeout(r, 7000));
   }
-})();
+}
 
 /* ---- team pickers ---- */
 function wireSlot(id, key) {
@@ -900,3 +899,7 @@ async function renderNbaAbout() {
     card.id = "nba-about"; page.appendChild(card);
   } catch { /* about stays football-only if the basketball model is unavailable */ }
 }
+
+/* ---- start: theme and copy for the chosen sport first, then wait for the server ---- */
+applySport();
+boot();
