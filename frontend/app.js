@@ -111,14 +111,15 @@ $("#nav").addEventListener("click", (e) => {
 /* ---- health + meta ---- */
 (async function boot() {
   const dot = $("#srvdot"), txt = $("#srvtxt");
+  applySport();   // theme and copy for the chosen sport straight away, even while the server wakes
   for (;;) {
     try {
       const hz = await api("/healthz");
       if (hz.model_ready) {
         dot.classList.add("ok"); txt.textContent = "model ready";
         S.meta = await api("/api/meta").catch(() => null);
-        if (S.meta) $("#datastamp").textContent = "results through " + S.meta.data_to;
-        applySport();
+        if (S.meta) { $("#datastamp").textContent = "results through " + S.meta.data_to; if (S.sport !== "basketball") $("#tagline").textContent = FOOTBALL_TAGLINE(); }
+        S.fixturesSig = null; loadFixtures();   // the rail may have failed while the store was still building
         return;
       }
       txt.textContent = "model warming (~2 min)…";
