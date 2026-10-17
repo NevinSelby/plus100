@@ -555,7 +555,7 @@ $("#sweep").onclick = async () => {
         ${b.match ? `<div class="mini" style="margin-top:2px">${esc(b.match)}</div>` : ""}
         <div class="pair"><span class="tag">books say</span><div class="hbar"><div style="width:${b.p_market*100}%;background:var(--blue)"></div></div><span class="val">${pct(b.p_market, 0)}</span></div>
         <div class="pair"><span class="tag">we say</span><div class="hbar"><div style="width:${b.p_model*100}%;background:var(--green)"></div></div><span class="val">${pct(b.p_model, 0)}</span></div>
-        ${b.p_blend != null ? `<div class="pair"><span class="tag">combined</span><div class="hbar"><div style="width:${b.p_blend*100}%;background:#7FB78E"></div></div><span class="val">${pct(b.p_blend, 0)}</span></div>` : ""}
+        ${b.p_blend != null ? `<div class="pair"><span class="tag">combined</span><div class="hbar"><div class="blend" style="width:${b.p_blend*100}%"></div></div><span class="val">${pct(b.p_blend, 0)}</span></div>` : ""}
         <div class="mini">best price ${odds(b.odds)} at ${esc(b.book)}${b.at_hardrock ? " (Hard Rock)" : ""} · implies ${(100 / b.odds).toFixed(0)}%${good ? ` · stake ${b.quarter_kelly_pct}% of bankroll` : ""}</div>`));
     });
     out.append(grid);
@@ -715,9 +715,13 @@ function applySport() {
   document.body.classList.toggle("sport-nba", nba);
   $$("#sportsw button").forEach(b => b.classList.toggle("on", b.dataset.sport === S.sport));
   $("#predict-h1").textContent = nba ? "Call any NBA game" : "Call any match on the planet";
+  document.title = nba ? "Plus100 · NBA predictions" : "Plus100 · Football predictions";
+  $('meta[name="theme-color"]').content = nba ? "#0C0D11" : "#F2F7F0";
+  $("#railtitle").textContent = nba ? "Tipping off soon" : "Kicking off soon";
+  $("#fixtures").classList.toggle("card", nba);
   $("#tagline").textContent = nba ? NBA_TAGLINE : FOOTBALL_TAGLINE();
   $("#market-sub").textContent = nba
-    ? "Live NBA prices from about 15 US sportsbooks, with their built-in margin stripped out, next to our margin-and-total model. A green card means the best price pays more than the combined estimate justifies."
+    ? "Live NBA prices from about 15 US sportsbooks, with their built-in margin stripped out, next to our margin-and-total model. A card edged in orange means the best price pays more than the combined estimate justifies. No orange card means no good bet exists tonight, and skipping is the right move."
     : "Live prices from about 15 US sportsbooks, with their built-in margin stripped out to reveal the probability they believe, next to ours. A green card means the best price pays more than the combined estimate justifies. No green card means no good bet exists today, and skipping is the right move.";
   $("input", $("#slot-home")).placeholder = nba ? "Search an NBA team…" : "Search any team…";
   $("input", $("#slot-away")).placeholder = nba ? "Search an NBA team…" : "Search any team…";
@@ -752,12 +756,13 @@ async function loadNbaFixtures() {
     const byName = Object.fromEntries(teams.map(t => [t.name, t]));
     d.fixtures.forEach(f => {
       const ko = new Date(f.kickoff);
-      const when = (f.live ? "in play · " : "") + ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
-        + " · " + ko.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-      const card = h("div", "fx", `<div class="lg">${esc(f.league)}</div>
-         <div class="teams">${esc(f.away)} <span style="color:var(--muted)">@</span> ${esc(f.home)}</div>
-         <div class="when">${esc(when)}</div>` +
-        (f.book_line || f.book_total ? `<div class="odds">books: ${esc(f.book_line || "")}${f.book_total ? ` · O/U ${f.book_total}` : ""}</div>` : ""));
+      const when = ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+        + " · " + ko.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      const card = h("div", "fx", `<div class="lg">${f.live ? '<span class="live">Live</span> · ' : ""}${esc(when)}</div>
+         <div class="teams"><span class="tm">${esc(f.away)}<small>AWAY</small></span><span class="ln">${esc(f.book_line || "")}</span>
+         <span class="tm">${esc(f.home)}<small>HOME</small></span><span class="ln">${f.book_total ? "O/U " + f.book_total : ""}</span></div>`);
+      card.tabIndex = 0; card.setAttribute("role", "button");
+      card.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); card.click(); } };
       card.onclick = () => {
         pickTeam("home", byName[f.home] || { id: f.home, name: f.home, elo: 1500, sport: "nba" });
         pickTeam("away", byName[f.away] || { id: f.away, name: f.away, elo: 1500, sport: "nba" });
@@ -787,70 +792,75 @@ async function predictNba() {
 }
 
 function nbaColors() {
-  const kh = kitColor(S.home?.color, true) || "#17A54B";
-  let ka = kitColor(S.away?.color, true) || "#2D7FF0";
-  if (cdist(kh, ka) < 95) ka = kitColor(S.away?.alt, true) || "#2D7FF0";
+  const kh = kitColor(S.home?.color, true) || "#F4F1EC";
+  let ka = kitColor(S.away?.color, true) || "#6FB1FF";
+  if (cdist(kh, ka) < 95) ka = kitColor(S.away?.alt, true) || "#6FB1FF";
   return [kh, ka];
 }
 
 function renderNba(out, p) {
   const [kh, ka] = nbaColors();
-  const w = p.win_prob, pr = p.projected, inp = p.inputs;
+  const w = p.win_prob, pr = p.projected, inp = p.inputs, mg = p.margins;
   const neutral = p.neutral_venue;
-  const bar = (label, prob, col, max) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
+  const sgn = (v) => (v > 0 ? "+" : "") + (v || 0);
+  const bar = (label, prob, col, max) => `<div class="pair"><span class="tag">${esc(label)}</span>
       <div class="hbar"><div style="width:${prob / (max || 1) * 100}%;background:${col}"></div></div><span class="val">${pct(prob)}</span></div>`;
-  const mg = p.margins;
   const mrows = [[`${p.home.name} by 11+`, mg.home_by_11_plus, kh], [`${p.home.name} by 6-10`, mg.home_by_6_10, kh],
     [`${p.home.name} by 1-5`, mg.home_by_1_5, kh], [`${p.away.name} by 1-5`, mg.away_by_1_5, ka],
     [`${p.away.name} by 6-10`, mg.away_by_6_10, ka], [`${p.away.name} by 11+`, mg.away_by_11_plus, ka]];
   const mmax = Math.max(...mrows.map(r => r[1]), 0.01);
-  const injList = (t, col) => t.injuries.length
-    ? t.injuries.map(i => `<div class="inj"><span><b style="color:${col}">${esc(i.player)}</b>${i.ppg ? ` <span class="mini">${i.ppg} ppg</span>` : ""}</span><span class="st ${/out/i.test(i.status) ? "out" : ""}">${esc(i.status)}${i.detail ? ` · ${esc(i.detail)}` : ""}</span></div>`).join("")
-    : `<div class="mini">No one listed on the injury report.</div>`;
-  const restTxt = (t) => t.rest_days <= 1 ? `second night of a back-to-back (${-NBA_B2B} pts)` : t.rest_days >= 3 ? `${t.rest_days} days' rest` : `${t.rest_days} day's rest`;
+  const fav = w.home >= w.away ? "home" : "away";
+  const logo = (t) => t?.logo ? `<img src="${esc(t.logo)}" alt="" loading="lazy">` : `<div class="ph"></div>`;
+  const sideOf = (tag, t) => `${neutral ? "neutral court" : tag} <i>· Elo ${t.elo}</i>`;
+  const row = (key, team, col, tag) => `<div class="sb-row${fav === key ? " fav" : ""}">${logo(team)}
+      <div><div class="nm">${esc(p[key].name)}</div><span class="side">${sideOf(tag, p[key])}</span></div>
+      <div class="win"><div class="pct count" style="color:${col}">${pct(w[key])}</div><div class="fair">fair ${odds(w.fair_odds[key])}</div></div>
+      <div class="pts count">${pr[key].toFixed(0)}</div></div>`;
+  const injList = (t) => t.injuries.length
+    ? t.injuries.map(i => `<div class="inj"><span><b>${esc(i.player)}</b>${i.ppg ? ` <span class="mini">${i.ppg} ppg</span>` : ""}</span><span class="st ${/out/i.test(i.status) ? "out" : ""}">${esc(i.status)}${i.detail ? ` · ${esc(i.detail)}` : ""}</span></div>`).join("")
+    : `<div class="mini" style="margin:4px 0 2px">No one listed on the injury report.</div>`;
+  const restTxt = (t) => t.rest_days <= 1 ? `back-to-back, second night (${-NBA_B2B} pts)` : t.rest_days >= 3 ? `${t.rest_days} days' rest` : `${t.rest_days} day's rest`;
   const hist = p.elo_history;
+  const under = "rgba(255,255,255,.28)";
+  const ab = (key) => (key === "home" ? S.home : S.away)?.abbr || p[key].name.toUpperCase();
+  const favKey = pr.margin >= 0 ? "home" : "away";
+  const spreadTxt = Math.abs(pr.margin) < 0.05 ? "pick 'em" : `${ab(favKey)} -${Math.abs(pr.margin).toFixed(1)}`;
   out.innerHTML = `<div class="hero">
-    <div class="inner">
-      <div class="cols">
-        <div>${S.home?.logo ? `<img class="nbalogo" src="${esc(S.home.logo)}">` : ""}
-          <div class="team">${esc(p.home.name)}</div><div class="sidetag">${neutral ? "neutral court" : "home"}</div>
-          <div class="pct count" style="color:${kh}">${pct(w.home)}</div><div class="fair">fair ${odds(w.fair_odds.home)}</div></div>
-        <div><div class="drawlbl">PROJECTED</div><div class="score">${pr.home.toFixed(0)}–${pr.away.toFixed(0)}<small>${esc(pr.spread)} · total ${pr.total.toFixed(1)}</small></div></div>
-        <div>${S.away?.logo ? `<img class="nbalogo" src="${esc(S.away.logo)}">` : ""}
-          <div class="team">${esc(p.away.name)}</div><div class="sidetag">${neutral ? "neutral court" : "away"}</div>
-          <div class="pct count" style="color:${ka}">${pct(w.away)}</div><div class="fair">fair ${odds(w.fair_odds.away)}</div></div>
-      </div>
-      <div class="stack"><div style="width:${w.home*100}%;background:${kh}"></div><div style="width:${w.away*100}%;background:${ka}"></div></div>
-      <div class="tiles">
-        <div class="tile"><b style="color:#FFB36B">${inp.home_court_pts > 0 ? "+" + inp.home_court_pts : "0"}</b><span>home court, in points</span></div>
-        <div class="tile"><b style="color:${inp.rest_adjust ? "#FFD27A" : "#fff"}">${inp.rest_adjust > 0 ? "+" : ""}${inp.rest_adjust || 0}</b><span>rest edge</span></div>
-        <div class="tile"><b style="color:${inp.injury_adjust ? "#FFD27A" : "#fff"}">${inp.injury_adjust > 0 ? "+" : ""}${inp.injury_adjust || 0}</b><span>injury edge</span></div>
-      </div>
-      <button class="mathbtn" id="mathbtn">${ICONS.divide} The math, with this game's numbers</button>
-    </div></div>
+    <div class="sb-top"><span><b>Projected final</b>${neutral ? " · neutral court" : ""}</span><span class="ln">${esc(spreadTxt)} · O/U ${pr.total.toFixed(1)}</span></div>
+    ${row("home", S.home, kh, "home")}
+    ${row("away", S.away, ka, "away")}
+    <div class="sb-bar"><div class="stack"><div style="width:${w.home*100}%;background:${kh}"></div><div style="width:${w.away*100}%;background:${ka}"></div></div>
+      <div class="cap"><span style="color:${kh}">${esc(ab("home"))} ${pct(w.home, 0)}</span><span>win probability</span><span style="color:${ka}">${pct(w.away, 0)} ${esc(ab("away"))}</span></div></div>
+    <div class="sb-cells">
+      <div class="${inp.home_court_pts ? "on" : ""}"><b>${inp.home_court_pts > 0 ? "+" + inp.home_court_pts : "0"}</b><span>home court, in points</span></div>
+      <div class="${inp.rest_adjust ? "on" : ""}"><b>${sgn(inp.rest_adjust)}</b><span>rest edge, in points</span></div>
+      <div class="${inp.injury_adjust ? "on" : ""}"><b>${sgn(inp.injury_adjust)}</b><span>injury edge, in points</span></div>
+    </div>
+    <div class="sb-foot"><span class="note">${esc(p.margin_note)}</span><button class="mathbtn" id="mathbtn">${ICONS.divide} The math, with this game's numbers</button></div>
+  </div>
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.grid} Winning margin <span class="note">how far apart they finish</span></h3>
         ${mrows.map(([l, v, c]) => bar(l, v, c, mmax)).join("")}
-        <div class="mini" style="margin-top:8px">${esc(p.margin_note)}</div></div>
-      <div class="card"><h3 class="sec">${ICONS.clock} At half-time</h3>
+        <div class="mini" style="margin-top:10px">Each band is the chance the final margin lands there. Bars are scaled to the most likely band.</div></div>
+      <div class="card"><h3 class="sec">${ICONS.clock} At half-time <span class="note">projected ${p.half_time.proj_home}–${p.half_time.proj_away}</span></h3>
         ${bar(`${p.home.name} ahead`, p.half_time.home, kh)}${bar(`${p.away.name} ahead`, p.half_time.away, ka)}
-        <div class="mini">Projected half-time score ${p.half_time.proj_home}–${p.half_time.proj_away}. Half-time leads carry about half the full-game margin.</div></div>
+        <div class="mini" style="margin-top:10px">Half-time leads carry about half the full-game margin, so the underdog is closer here than at the final buzzer.</div></div>
     </div>
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.bar} Spread lines <span class="note">chance each side covers</span></h3>
-        <div class="linerow mini"><span>line</span><span>${esc(p.home.name)}</span><span></span><span>${esc(p.away.name)}</span><span></span></div>
+        <div class="linerow hd"><span>line</span><span>${esc(p.home.name)}</span><span></span><span>${esc(p.away.name)}</span><span></span></div>
         ${p.spreads.map(s => `<div class="linerow"><b>${s.line > 0 ? "+" : ""}${s.line}</b><div class="hbar"><div style="width:${s.home_cover*100}%;background:${kh}"></div></div><span>${pct(s.home_cover, 0)}</span><div class="hbar"><div style="width:${s.away_cover*100}%;background:${ka}"></div></div><span>${pct(s.away_cover, 0)}</span></div>`).join("")}
-        <div class="mini">Lines are from ${esc(p.home.name)}'s side: a negative number means they are giving points.</div></div>
+        <div class="mini" style="margin-top:10px">Lines are from ${esc(p.home.name)}'s side: a negative number means they are giving points.</div></div>
       <div class="card"><h3 class="sec">${ICONS.list} Total points <span class="note">over / under</span></h3>
-        <div class="linerow mini"><span>line</span><span>over</span><span></span><span>under</span><span></span></div>
-        ${p.totals.map(t => `<div class="linerow"><b>${t.line}</b><div class="hbar"><div style="width:${t.over*100}%;background:var(--green)"></div></div><span>${pct(t.over, 0)}</span><div class="hbar"><div style="width:${t.under*100}%;background:#9AA69C"></div></div><span>${pct(t.under, 0)}</span></div>`).join("")}
-        <div class="mini">Projected total ${pr.total.toFixed(1)}; typical game-to-game spread about ${inp.sd_total} points.</div></div>
+        <div class="linerow hd"><span>line</span><span>over</span><span></span><span>under</span><span></span></div>
+        ${p.totals.map(t => `<div class="linerow"><b>${t.line}</b><div class="hbar"><div style="width:${t.over*100}%;background:var(--green)"></div></div><span>${pct(t.over, 0)}</span><div class="hbar"><div style="width:${t.under*100}%;background:${under}"></div></div><span>${pct(t.under, 0)}</span></div>`).join("")}
+        <div class="mini" style="margin-top:10px">Projected total ${pr.total.toFixed(1)}; game-to-game totals scatter by about ${inp.sd_total} points.</div></div>
     </div>
     <div class="duo">
       <div class="card"><h3 class="sec">${ICONS.users} Injuries and rest</h3>
-        <div class="mini" style="margin-bottom:6px"><b>${esc(p.home.name)}</b> · ${restTxt(p.home)}</div>${injList(p.home, kh)}
-        <div class="mini" style="margin:12px 0 6px"><b>${esc(p.away.name)}</b> · ${restTxt(p.away)}</div>${injList(p.away, ka)}
-        <div class="mini" style="margin-top:8px">Players listed out cost their side about half their scoring average; doubtful or questionable players a quarter. Load-management "rest" tags are not priced.</div></div>
+        <div class="sb-team"><b>${esc(p.home.name)}</b><span>${restTxt(p.home)}</span></div>${injList(p.home)}
+        <div class="sb-team"><b>${esc(p.away.name)}</b><span>${restTxt(p.away)}</span></div>${injList(p.away)}
+        <div class="mini" style="margin-top:10px">Players listed out cost their side about half their scoring average; doubtful or questionable players a quarter. Load-management rest tags are not priced.</div></div>
       <div class="card"><h3 class="sec">${ICONS.repeat} Head to head <span class="note">most recent first</span></h3>
         ${p.h2h.length ? p.h2h.map(g => `<div class="inj"><span>${esc(g.date)} · ${esc(g.away)} @ <b>${esc(g.home)}</b></span><span class="st">${esc(g.score)}</span></div>`).join("") : `<div class="mini">No meetings in the stored seasons.</div>`}
         <div class="mini" style="margin-top:10px">Ratings now: ${esc(p.home.name)} ${p.home.elo} · ${esc(p.away.name)} ${p.away.elo}${hist.home.length ? ` · ${hist.home.length} most recent games tracked` : ""}</div></div>
