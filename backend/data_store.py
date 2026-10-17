@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+import json
 import os
 
 # Small cloud instances (512 MB) cannot hold the full history while building.
@@ -367,11 +368,49 @@ def compute_strengths(m: pd.DataFrame, half_life_days: float = 420.0,
     return att, deff, lg_stats
 
 
+def _merge_recent(m: pd.DataFrame) -> pd.DataFrame:
+    """Add this week's finished matches (data/espn_recent.json, written by the
+    refresher from ESPN) that the weekly history files do not carry yet, so a
+    result from this afternoon moves tonight's ratings. Rows already present
+    in the files (same pairing within two days) are left to the files."""
+    f = DATA / "espn_recent.json"
+    if not f.exists():
+        return m
+    try:
+        rows = json.loads(f.read_text())
+    except (OSError, ValueError):
+        return m
+    if not rows:
+        return m
+    r = pd.DataFrame(rows)
+    r["date"] = pd.to_datetime(r.date, errors="coerce")
+    r = r.dropna(subset=["date"])
+    r["season"] = r.date.map(lambda d: f"{(d.year if d.month >= 7 else d.year - 1) % 100:02d}"
+                                       f"{(d.year + 1 if d.month >= 7 else d.year) % 100:02d}")
+    r["scope"] = "club"
+    club = m[m.scope == "club"]
+    recent = club[club.date >= r.date.min() - pd.Timedelta(days=2)]
+    have = {(str(h), str(a), d.normalize()) for h, a, d in zip(recent.home, recent.away, recent.date)}
+    keep = []
+    for i, row in r.iterrows():
+        d0 = row.date.normalize()
+        if any((row.home, row.away, d0 + pd.Timedelta(days=k)) in have for k in (-2, -1, 0, 1, 2)):
+            continue
+        keep.append(i)
+    r = r.loc[keep]
+    if r.empty:
+        return m
+    print(f"[recent] merged {len(r)} results from ESPN not yet in the history files")
+    return pd.concat([m, r[["date", "home", "away", "hg", "ag", "league", "season", "scope"]]],
+                     ignore_index=True)
+
+
 class Store:
     def __init__(self):
         club = load_club_matches()
         intl = load_intl_matches()
-        m = pd.concat([club, intl], ignore_index=True).sort_values("date").reset_index(drop=True)
+        m = pd.concat([club, intl], ignore_index=True)
+        m = _merge_recent(m).sort_values("date").reset_index(drop=True)
 
         # team ids: clubs may share names across countries rarely; key by name+scope
         m["home_id"] = m.home.map(slug) + np.where(m.scope == "intl", "@intl", "")
@@ -505,7 +544,7 @@ class Store:
         """xG strengths and scorer shares from the understat-built artifact.
         backend/xg.py rebuilds it from live data on every refresh cycle."""
         self.xg_attack, self.xg_defence, self.player_rates = {}, {}, {}
-        self.xg_data_to = None
+        self.player_minutes, self.xg_data_to = {}, None
         pre = DATA / "xg_precomputed.json.gz"
         if not pre.exists():
             return
@@ -514,6 +553,7 @@ class Store:
             blob = _json.load(fh)
         self.xg_attack, self.xg_defence = blob["xg_attack"], blob["xg_defence"]
         self.player_rates, self.xg_data_to = blob["player_rates"], blob["xg_data_to"]
+        self.player_minutes = blob.get("player_minutes", {})
         print(f"[xg] loaded strengths to {self.xg_data_to} ({len(self.player_rates)} squads)")
 
     def _fit_contexts(self):

@@ -70,6 +70,7 @@ def build(registry: dict, today: dt.date | None = None) -> dict | None:
     records = []        # (league, tid, side, date, xg_for, xg_against)
     team_games = {}     # (tid, season) -> matches played
     players = {}        # tid -> {name: {pxg, w_apps, apps, current}}
+    minutes = {}        # tid -> {name: weighted minutes} — who actually starts
     unmatched, loaded = set(), 0
     for us_lg, code in LEAGUES.items():
         for season in (cur, cur - 1):
@@ -96,6 +97,8 @@ def build(registry: dict, today: dt.date | None = None) -> dict | None:
                     p.get("player_name"), {"pxg": 0.0, "w_apps": 0.0, "apps": 0,
                                            "current": False})
                 games = _num(p.get("games"))
+                mins = minutes.setdefault(tid, {})
+                mins[p.get("player_name")] = mins.get(p.get("player_name"), 0.0) + sw * _num(p.get("time"))
                 row["pxg"] += sw * _num(p.get("xG"))
                 row["w_apps"] += sw * games
                 row["apps"] += int(games)
@@ -158,8 +161,10 @@ def build(registry: dict, today: dt.date | None = None) -> dict | None:
 
     return {"xg_attack": {k: round(v, 4) for k, v in att.items()},
             "xg_defence": {k: round(v, 4) for k, v in dfc.items()},
-            "player_rates": rates, "xg_data_to": latest,
-            "built_at": today.isoformat()}
+            "player_rates": rates,
+            "player_minutes": {tid: {n: int(m) for n, m in rows.items() if m > 0}
+                               for tid, rows in minutes.items()},
+            "xg_data_to": latest, "built_at": today.isoformat()}
 
 
 def refresh(registry: dict) -> bool:

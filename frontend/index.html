@@ -9,17 +9,18 @@
 <link rel="manifest" href="/static/manifest.json">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800;900&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=45">
+<link rel="stylesheet" href="/static/style.css?v=46">
 </head>
 <body>
 <div class="shell">
   <aside class="sidebar">
     <div class="brand"><div class="mark">+</div><div class="name">Plus100</div></div>
+    <div class="sportsw" id="sportsw" role="tablist"><button data-sport="football" class="on">Football</button><button data-sport="basketball">Basketball</button></div>
     <nav class="nav" id="nav">
       <button data-page="predict" class="on"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg><span>Predict</span></button>
       <button data-page="market"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 20V10M12 20V4M20 20v-7"/></svg><span>Vs Market</span></button>
-      <button data-page="parlays"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2l9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg><span>Parlays</span></button>
-      <button data-page="fantasy"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="8" r="5"/><path d="M9 13l-2 8 5-3 5 3-2-8"/></svg><span>Fantasy</span></button>
+      <button data-page="parlays" class="fb-only"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 2l9 5-9 5-9-5 9-5zM3 12l9 5 9-5M3 17l9 5 9-5"/></svg><span>Parlays</span></button>
+      <button data-page="fantasy" class="fb-only"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><circle cx="12" cy="8" r="5"/><path d="M9 13l-2 8 5-3 5 3-2-8"/></svg><span>Fantasy</span></button>
       <button data-page="about"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg><span>About</span></button>
     </nav>
     <div class="side-foot"><span class="dot" id="srvdot"></span><span id="srvtxt">connecting…</span><div id="datastamp"></div></div>
@@ -28,7 +29,7 @@
   <main class="main">
     <!-- ============ PREDICT ============ -->
     <section class="page on" id="page-predict">
-      <h1>Call any match on the planet</h1>
+      <h1 id="predict-h1">Call any match on the planet</h1>
       <p class="sub" id="tagline">Probabilities for every football match, from our full match history, live team news and each side's probable players.</p>
       <div class="grid2">
         <div>
@@ -65,7 +66,7 @@
     <!-- ============ VS MARKET ============ -->
     <section class="page" id="page-market">
       <h1>Bookmakers vs our model</h1>
-      <p class="sub">Live prices from about 15 US sportsbooks, with their built-in margin stripped out to reveal the probability they believe, next to ours. A green card means the best price pays more than the combined estimate justifies. No green card means no good bet exists today, and skipping is the right move.</p>
+      <p class="sub" id="market-sub">Live prices from about 15 US sportsbooks, with their built-in margin stripped out to reveal the probability they believe, next to ours. A green card means the best price pays more than the combined estimate justifies. No green card means no good bet exists today, and skipping is the right move.</p>
       <button class="btn" id="sweep">Scan the next two days</button>
       <div id="marketout"></div>
     </section>
@@ -91,6 +92,6 @@
     </section>
   </main>
 </div>
-<script src="/static/app.js?v=45"></script>
+<script src="/static/app.js?v=46"></script>
 </body>
 </html>

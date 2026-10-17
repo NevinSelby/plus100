@@ -59,6 +59,8 @@ def _warm_up() -> None:
             warmup["error"] = None
             from .refresher import start_background
             start_background()
+            threading.Thread(target=_prewarm, daemon=True, name="plus100-prewarm").start()
+            threading.Thread(target=_keepalive, daemon=True, name="plus100-keepalive").start()
             return
         except Exception as e:  # noqa: BLE001
             warmup["error"] = f"{str(e)[:250]} (retrying in {delay}s)"
@@ -68,6 +70,52 @@ def _warm_up() -> None:
 
 from .refresher import REFRESH_HOURS  # noqa: E402
 from .refresher import state as refresher_state  # noqa: E402
+
+
+def _keepalive() -> None:
+    """The free host sleeps after 15 idle minutes and takes a minute to wake,
+    which users feel as 'the app is slow'. Touching our own public URL every
+    ten minutes counts as traffic and keeps it awake while anyone used it today."""
+    url = os.environ.get("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not url:
+        return
+    while True:
+        time.sleep(600)
+        try:
+            requests.get(f"{url}/healthz", timeout=20)
+        except requests.RequestException:
+            pass
+
+
+def _prewarm() -> None:
+    """Fill the per-team caches (news, availability, crest, squad) for every
+    team in the next week's fixture rail, so the first user to open a match
+    gets an instant answer instead of paying for six upstream fetches."""
+    try:
+        time.sleep(5)
+        fx = upcoming_fixtures(days=8, limit=60)["fixtures"]
+    except Exception:  # noqa: BLE001
+        return
+    seen = []
+    for f in fx:
+        for tid in (f["home_id"], f["away_id"]):
+            if tid not in seen:
+                seen.append(tid)
+    for tid in seen[:48]:
+        try:
+            _auto_absences(tid)
+            _tsdb_team(tid)
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
+    for f in fx[:16]:
+        try:
+            eg = expected_goals(store, f["home_id"], f["away_id"], neutral=False)
+            _team_lineup(f["home_id"], eg["lambda_home"])
+            _team_lineup(f["away_id"], eg["lambda_away"])
+        except Exception:  # noqa: BLE001
+            pass
+        time.sleep(0.2)
 
 
 @app.on_event("startup")
@@ -349,8 +397,11 @@ def predict_endpoint(request: Request, home: str, away: str, neutral: bool = Fal
     oa = [p.strip() for p in out_away.split("|") if p.strip()]
     # No manual list given: scan team news for likely absentees so the numbers
     # reflect who can actually play, not just the two crests.
-    auto_oh = [] if oh else _auto_absences(home)
-    auto_oa = [] if oa else _auto_absences(away)
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_h = ex.submit(lambda: [] if oh else _auto_absences(home))
+        f_a = ex.submit(lambda: [] if oa else _auto_absences(away))
+        auto_oh, auto_oa = f_h.result(), f_a.result()
     p = predict(store, home, away, neutral, out_home=oh or auto_oh,
                 out_away=oa or auto_oa, context=context)
     _verify_squads(p)
@@ -506,13 +557,13 @@ def _tsdb_search_team(t: dict):
     'Nottingham Forest' finds nothing, 'nottingham forest' works), so retry."""
     known = TSDB_TEAM_IDS.get(t["id"])
     if known:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/lookupteam.php",
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/123/lookupteam.php",
                          params={"id": known}, headers=UA, timeout=8)
         rec = ((r.json() or {}).get("teams") or [None])[0]
         return rec if rec and rec.get("strSport") == "Soccer" else None
     q = TSDB_SEARCH_ALIASES.get(t["id"], t["name"])
     for query in dict.fromkeys((q, q.lower())):
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchteams.php",
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/123/searchteams.php",
                          params={"t": query}, headers=UA, timeout=8)
         soccer = [x for x in (r.json() or {}).get("teams") or []
                   if x.get("strSport") == "Soccer"]
@@ -608,7 +659,7 @@ def _tsdb_squad(team_id: str) -> list[dict]:
     try:
         best = _tsdb_search_team(t)
         if best:
-            r2 = requests.get("https://www.thesportsdb.com/api/v1/json/3/lookup_all_players.php",
+            r2 = requests.get("https://www.thesportsdb.com/api/v1/json/123/lookup_all_players.php",
                               params={"id": best["idTeam"]}, headers=UA, timeout=8)
             for p in (r2.json() or {}).get("player") or []:
                 if (p.get("strStatus") or "").lower() in ("deceased", "retired"):
@@ -651,7 +702,7 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
     tk = norm_key(team_name)
     gated, exact_only = None, None
     try:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchplayers.php",
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/123/searchplayers.php",
                          params={"p": name}, headers=UA, timeout=6)
         if r.status_code != 200:
             return None                       # rate limited: don't cache the miss
@@ -730,6 +781,18 @@ def _team_lineup(tid: str, lam: float) -> dict:
             squad = []
         if squad:
             source = "the official Premier League squad list"
+    espn_outs: list[str] = []
+    if not squad:
+        try:
+            from . import espn
+            roster = espn.soccer_roster(store, tid) if reg.get("scope") == "club" \
+                else espn.intl_roster(t["name"])
+        except Exception:  # noqa: BLE001
+            roster = []
+        if len(roster) >= 11:
+            squad = [dict(p) for p in roster]
+            espn_outs = [p["name"] for p in roster if p.get("injured")]
+            source = "the current squad list"
     if not squad:
         squad = [dict(p) for p in _tsdb_squad(tid)]
         # the public feed lags transfers: drop anyone whose CURRENT club, per a
@@ -758,6 +821,20 @@ def _team_lineup(tid: str, lam: float) -> dict:
     for p in squad:
         p["p_score"] = match_prob(p["name"])
 
+    # playing time decides who starts. PL squads carry FPL minutes; for the other
+    # big leagues understat's per-player minutes fill the same role.
+    umins = store.player_minutes.get(tid) or {}
+    if umins and not any(p.get("minutes") for p in squad):
+        by_key = {norm_key(n): m for n, m in umins.items()}
+        for p in squad:
+            k = norm_key(p["name"])
+            m = by_key.get(k)
+            if m is None:
+                last = k[-6:] if len(k) > 6 else k
+                cands = [v for kk, v in by_key.items() if len(last) >= 5 and kk.endswith(last)]
+                m = max(cands) if len(cands) == 1 else None
+            p["minutes"] = m or 0
+
     # top scorers missing from the squad list get looked up individually
     intl = reg.get("scope") != "club"
     extra_budget = 5
@@ -777,6 +854,7 @@ def _team_lineup(tid: str, lam: float) -> dict:
     # drop players the news says are out — but never empty a position doing it,
     # or a single injury headline can leave a side with no keeper or no striker
     outs = _news_absences(tid, [p["name"] for p in squad])
+    outs += [n for n in espn_outs if n not in outs]     # the roster's own injury flags
     if reg.get("scope") == "club":
         outs = _fpl_flagged_outs(tid, [p["name"] for p in squad], outs)
     if outs:
@@ -800,8 +878,13 @@ def _team_lineup(tid: str, lam: float) -> dict:
     for p in squad:
         pool[p["bucket"]].append(p)
     for b in pool:
-        pool[b].sort(key=lambda p: (-(p.get("p_score") or 0), -(p.get("minutes") or 0),
-                                    -(p.get("sel") or 0), p.get("img") is None, p["name"]))
+        def _jersey(p):
+            try:
+                return int(p.get("jersey") or 99)
+            except (TypeError, ValueError):
+                return 99
+        pool[b].sort(key=lambda p: (-(p.get("minutes") or 0), -(p.get("p_score") or 0),
+                                    -(p.get("sel") or 0), _jersey(p), p.get("img") is None, p["name"]))
 
     shape = _pick_formation(len(pool["DEF"]), len(pool["MID"]), len(pool["FWD"]))
     partial = shape is None or not pool["GK"]
@@ -853,8 +936,11 @@ def lineup(home: str, away: str, neutral: bool = False):
     _team_or_404(home)
     _team_or_404(away)
     eg = expected_goals(store, home, away, neutral=neutral)
-    h = _team_lineup(home, eg["lambda_home"])
-    a = _team_lineup(away, eg["lambda_away"])
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f_h = ex.submit(_team_lineup, home, eg["lambda_home"])
+        f_a = ex.submit(_team_lineup, away, eg["lambda_away"])
+        h, a = f_h.result(), f_a.result()
     srcs = sorted({h["source"], a["source"]})
     return {
         "home": h, "away": a,
@@ -879,7 +965,7 @@ def _player_current_team(player: str) -> str | None:
         return hit.get("team")
     team = None
     try:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/3/searchplayers.php",
+        r = requests.get("https://www.thesportsdb.com/api/v1/json/123/searchplayers.php",
                          params={"p": player}, headers=UA, timeout=6)
         if r.status_code == 200:
             players = (r.json() or {}).get("player") or []
@@ -1145,6 +1231,12 @@ def _flush_usage() -> None:
 
 @app.middleware("http")
 async def _track_usage(request: Request, call_next):
+    if warmup["ready"]:
+        try:
+            from .refresher import maybe_refresh
+            maybe_refresh()
+        except Exception:  # noqa: BLE001
+            pass
     response = await call_next(request)
     try:
         path = request.url.path
@@ -1261,6 +1353,63 @@ def admin_stats(request: Request):
                      "wipes its disk on every deploy or restart, so history starts "
                      "over at that point."),
         }
+
+
+# ---------- basketball (NBA): same product, different sport ----------
+from . import nba as _nba  # noqa: E402
+
+
+@app.get("/api/nba/teams")
+def nba_teams():
+    try:
+        return _nba.teams()
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(503, f"basketball data unavailable: {str(e)[:80]}")
+
+
+@app.get("/api/nba/predict")
+def nba_predict(request: Request, home: str, away: str, neutral: bool = False):
+    if home == away:
+        raise HTTPException(400, "pick two different teams")
+    try:
+        p = _nba.predict(home, away, neutral)
+    except KeyError:
+        raise HTTPException(404, "unknown team")
+    try:
+        _sb_log({"kind": "prediction", "path": "/api/nba/predict", "visitor": _visitor_id(request),
+                 "ip": _client_ip(request), "home": home, "away": away, "context": "nba",
+                 "neutral": bool(neutral)})
+    except Exception:  # noqa: BLE001
+        pass
+    p["h2h"] = _nba.h2h(home, away)
+    return p
+
+
+@app.get("/api/nba/fixtures")
+def nba_fixtures(days: int = 7):
+    return {"fixtures": _nba.upcoming(max(1, min(days, 14))),
+            "note": "Official schedule, refreshed every half hour. Lines shown are the books' current numbers."}
+
+
+@app.get("/api/nba/bestbets")
+def nba_bestbets(key: str = ""):
+    k = _resolve_key(key)
+    if not k:
+        return {"error": "no_key", "detail": "No odds API key configured on this server."}
+    return _nba.grade_odds(k)
+
+
+@app.get("/api/nba/meta")
+def nba_meta():
+    m = _nba.model()
+    return {"games": m["n_games"], "data_from": m["data_from"], "data_to": m["data_to"],
+            "season": m["season"], "eval": m["eval"],
+            "fit": {"points_per_elo": round(m["slope"], 4), "home_court_pts": round(m["slope"] * _nba.HOME_ELO, 1),
+                    "sd_margin": round(m["sd_m"], 1), "sd_total": round(m["sd_t"], 1),
+                    "league_total": round(m["lg_total"], 1)},
+            "note": ("Elo with a margin-of-victory multiplier, re-fitted on every refresh. The "
+                     "slope from rating gap to points and both spreads are measured on the stored "
+                     "games, not assumed. Walk-forward accuracy is on the most recent full season.")}
 
 
 @app.get("/admin")
@@ -1500,7 +1649,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
 
         for lgid, lgname, country in _TSDB_LEAGUES:
             try:
-                r2 = requests.get("https://www.thesportsdb.com/api/v1/json/3/eventsnextleague.php",
+                r2 = requests.get("https://www.thesportsdb.com/api/v1/json/123/eventsnextleague.php",
                                   params={"id": lgid}, headers=UA, timeout=8)
                 for ev in (r2.json() or {}).get("events") or []:
                     ts = ev.get("strTimestamp")

@@ -95,7 +95,8 @@ const initialsOf = (n) => n.split(" ").map(w => w[0]).filter(Boolean).slice(0, 2
 const lastName = (n) => n.split(" ").slice(-1)[0];
 
 /* ---- global state ---- */
-const S = { home: null, away: null, prediction: null, meta: null, run: 0 };
+const S = { home: null, away: null, prediction: null, meta: null, run: 0,
+            sport: localStorage.getItem("plus100.sport") || "football", nbaTeams: null };
 
 /* ---- navigation ---- */
 $("#nav").addEventListener("click", (e) => {
@@ -104,7 +105,7 @@ $("#nav").addEventListener("click", (e) => {
   $$(".page").forEach(p => p.classList.toggle("on", p.id === "page-" + b.dataset.page));
   if (b.dataset.page === "fantasy" && !S.fplLoaded) loadFPL();
   if (b.dataset.page === "parlays") loadParlays();
-  if (b.dataset.page === "about") renderAbout();
+  if (b.dataset.page === "about") { renderAbout(); renderNbaAbout(); }
 });
 
 /* ---- health + meta ---- */
@@ -116,11 +117,8 @@ $("#nav").addEventListener("click", (e) => {
       if (hz.model_ready) {
         dot.classList.add("ok"); txt.textContent = "model ready";
         S.meta = await api("/api/meta").catch(() => null);
-        if (S.meta) {
-          $("#tagline").textContent = `Probabilities for every football match, from ${S.meta.matches.toLocaleString()} games of history, live team news and each side's probable players.`;
-          $("#datastamp").textContent = "results through " + S.meta.data_to;
-        }
-        loadFixtures();
+        if (S.meta) $("#datastamp").textContent = "results through " + S.meta.data_to;
+        applySport();
         return;
       }
       txt.textContent = "model warming (~2 min)…";
@@ -142,10 +140,12 @@ function wireSlot(id, key) {
     if (q.length < 2) { dd.hidden = true; return; }
     timer = setTimeout(async () => {
       try {
-        const opts = await api("/api/teams", { q });
+        const opts = S.sport === "basketball"
+          ? (await nbaTeams()).filter(t => t.name.toLowerCase().includes(q.toLowerCase()) || (t.abbr || "").toLowerCase() === q.toLowerCase())
+          : await api("/api/teams", { q });
         dd.innerHTML = "";
         opts.slice(0, 6).forEach(t => {
-          const b = h("button", "", `<div class="l">${esc(t.name)}</div><div class="s">${esc(t.league)} · elo ${Math.round(t.elo)}</div>`);
+          const b = h("button", "", `<div class="l">${esc(t.name)}</div><div class="s">${esc(t.league || "NBA")} · elo ${Math.round(t.elo)}</div>`);
           b.onclick = () => pickTeam(key, t);
           dd.appendChild(b);
         });
@@ -177,6 +177,13 @@ function pickTeam(key, t, keepNeutral, hydrated) {
   updateGo(); sweepLabel(); updateSwap();
   if (S.home && S.away && !keepNeutral)   // real home fixture unless country vs country
     $("#neutral").checked = S.home.scope === "intl" && S.away.scope === "intl";
+  if (t.sport === "nba") {            // basketball teams arrive fully described
+    if (t.logo) { oldBadge.src = t.logo; oldBadge.hidden = false; }
+    $(".meta", slot).textContent = `NBA · elo ${Math.round(t.elo)}`;
+    $("#neutral").checked = false;
+    logoWaits[key] = Promise.resolve();
+    return;
+  }
   if (hydrated) { logoWaits[key] = Promise.resolve(); return; }   // swap: nothing new to fetch
   logoWaits[key] = api("/api/logo", { team_id: t.id }).then(info => {
     Object.assign(t, info);
@@ -215,6 +222,7 @@ $("#swap").onclick = () => {
 
 /* ---- fixtures rail ---- */
 async function loadFixtures() {
+  if (S.sport === "basketball") return loadNbaFixtures();
   const box = $("#fixtures");
   try {
     const d = await api("/api/fixtures/upcoming", { days: 8, limit: 26, _: Date.now() });
@@ -259,6 +267,7 @@ document.addEventListener("visibilitychange", () => { if (!document.hidden) load
 
 /* ---- prediction flow ---- */
 async function predictNow() {
+  if (S.sport === "basketball") return predictNba();
   const out = $("#results");
   const rid = ++S.run;   // only the latest request may render
   out.innerHTML = LOADER(`replaying ${S.meta ? S.meta.matches.toLocaleString() : "every stored"} match${S.meta ? "es" : ""} of history…`);
@@ -509,16 +518,17 @@ function openMath(p) {
 
 /* ---- vs market ---- */
 function sweepLabel() {
-  $("#sweep").textContent = S.home && S.away
-    ? `Grade ${S.home.name} v ${S.away.name}` : "Scan the next two days";
+  $("#sweep").textContent = S.sport === "basketball" ? "Scan NBA games in the next two days"
+    : S.home && S.away ? `Grade ${S.home.name} v ${S.away.name}` : "Scan the next two days";
 }
 $("#sweep").onclick = async () => {
   const btn = $("#sweep"), out = $("#marketout");
   btn.disabled = true;   // each click spends real odds credits; no double-fires
   out.innerHTML = LOADER("shopping 15 sportsbooks for prices…");
   try {
-    const params = S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
-    const d = await api("/api/bestbets", params);
+    const nba = S.sport === "basketball";
+    const params = !nba && S.home && S.away ? { home: S.home.id, away: S.away.id } : undefined;
+    const d = await api(nba ? "/api/nba/bestbets" : "/api/bestbets", params);
     if (d.error) {
       const msg = d.error === "quota"
         ? "The odds allowance for this month is used up; it resets on the 1st."
@@ -532,7 +542,7 @@ $("#sweep").onclick = async () => {
         params ? (d.fixtures === 1
           ? "The books list this match, but none of its markets can be graded right now."
           : "The books aren't listing this match yet, so there's nothing to grade. Prices usually appear a day or two before kickoff.")
-        : d.fixtures === 0 ? "The books aren't listing football in the next two days. This happens between rounds; check back on a match week."
+        : d.fixtures === 0 ? (nba ? "The books aren't listing NBA games in the next two days yet. Lines usually appear the day before tip-off." : "The books aren't listing football in the next two days. This happens between rounds; check back on a match week.")
         : `Checked ${d.fixtures} listed game${d.fixtures === 1 ? "" : "s"}. No price beats the combined estimate right now, which is the normal state. Not betting today costs you nothing.`}</div>`));
       return;
     }
@@ -680,4 +690,199 @@ function renderAbout() {
     <p class="sub">Against closing prices nothing out-predicts the market, including this model — tested on thousands of unseen matches, adding our model to the closing price made predictions slightly worse, not better. Edges come from disagreements between books, soft early prices, and boosts. That is what Vs Market hunts.</p>
     <h3 class="sec">Play it safe</h3>
     <p class="sub">Only bet money you can afford to lose. If it stops being fun, call 1-800-GAMBLER — free, confidential, always open. Nothing here is financial advice; you alone decide whether and how much to bet.</p>`;
+}
+
+
+/* =====================================================================
+   Sport switch + basketball (NBA). Same product, different mathematics:
+   a game is a point margin and a point total, each close to normal.
+   ===================================================================== */
+const FOOTBALL_TAGLINE = () => `Probabilities for every football match, from ${S.meta ? S.meta.matches.toLocaleString() + " games of history" : "our full match history"}, live team news and each side's probable players.`;
+const NBA_TAGLINE = "Win probability, projected score, spread and total for every NBA game, from five seasons of results, tonight's injury report and each side's rest.";
+
+function clearSlots() {
+  for (const key of ["home", "away"]) {
+    const slot = $(key === "home" ? "#slot-home" : "#slot-away");
+    S[key] = null; $("input", slot).value = ""; slot.classList.remove("filled");
+    $("img.badge", slot).hidden = true; $(".meta", slot).textContent = ""; $(".dd", slot).hidden = true;
+  }
+  S.prediction = null; $("#results").innerHTML = "";
+  updateGo(); updateSwap(); sweepLabel();
+}
+
+function applySport() {
+  const nba = S.sport === "basketball";
+  document.body.classList.toggle("sport-nba", nba);
+  $$("#sportsw button").forEach(b => b.classList.toggle("on", b.dataset.sport === S.sport));
+  $("#predict-h1").textContent = nba ? "Call any NBA game" : "Call any match on the planet";
+  $("#tagline").textContent = nba ? NBA_TAGLINE : FOOTBALL_TAGLINE();
+  $("#market-sub").textContent = nba
+    ? "Live NBA prices from about 15 US sportsbooks, with their built-in margin stripped out, next to our margin-and-total model. A green card means the best price pays more than the combined estimate justifies."
+    : "Live prices from about 15 US sportsbooks, with their built-in margin stripped out to reveal the probability they believe, next to ours. A green card means the best price pays more than the combined estimate justifies. No green card means no good bet exists today, and skipping is the right move.";
+  $("input", $("#slot-home")).placeholder = nba ? "Search an NBA team…" : "Search any team…";
+  $("input", $("#slot-away")).placeholder = nba ? "Search an NBA team…" : "Search any team…";
+  const goBtn = $("#go"); goBtn.lastChild.textContent = nba ? " Predict this game" : " Predict this match";
+  const sw = $("label.switch"); sw.lastChild.textContent = nba ? " neutral court" : " neutral venue";
+  $("#marketout").innerHTML = "";
+  const onPage = $$(".page").find(p => p.classList.contains("on"));
+  if (nba && onPage && (onPage.id === "page-parlays" || onPage.id === "page-fantasy")) $$("#nav button")[0].click();
+  clearSlots();
+  S.fixturesSig = null;
+  loadFixtures();
+}
+$("#sportsw").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b || b.dataset.sport === S.sport) return;
+  S.sport = b.dataset.sport; localStorage.setItem("plus100.sport", S.sport); applySport();
+});
+
+async function nbaTeams() {
+  if (!S.nbaTeams) S.nbaTeams = (await api("/api/nba/teams")).map(t => ({ ...t, sport: "nba", league: "NBA" }));
+  return S.nbaTeams;
+}
+
+async function loadNbaFixtures() {
+  const box = $("#fixtures");
+  try {
+    const [d, teams] = await Promise.all([api("/api/nba/fixtures", { days: 7 }), nbaTeams()]);
+    const sig = JSON.stringify(d.fixtures);
+    if (sig === S.fixturesSig) return;
+    S.fixturesSig = sig; box.innerHTML = "";
+    $("#fxnote").textContent = d.fixtures.length + " games";
+    if (!d.fixtures.length) { box.append(h("div", "mini", "No NBA games scheduled in the next week.")); return; }
+    const byName = Object.fromEntries(teams.map(t => [t.name, t]));
+    d.fixtures.forEach(f => {
+      const ko = new Date(f.kickoff);
+      const when = (f.live ? "in play · " : "") + ko.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })
+        + " · " + ko.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const card = h("div", "fx", `<div class="lg">${esc(f.league)}</div>
+         <div class="teams">${esc(f.away)} <span style="color:var(--muted)">@</span> ${esc(f.home)}</div>
+         <div class="when">${esc(when)}</div>` +
+        (f.book_line || f.book_total ? `<div class="odds">books: ${esc(f.book_line || "")}${f.book_total ? ` · O/U ${f.book_total}` : ""}</div>` : ""));
+      card.onclick = () => {
+        pickTeam("home", byName[f.home] || { id: f.home, name: f.home, elo: 1500, sport: "nba" });
+        pickTeam("away", byName[f.away] || { id: f.away, name: f.away, elo: 1500, sport: "nba" });
+        predictNow(); window.scrollTo({ top: 0, behavior: "smooth" });
+      };
+      box.appendChild(card);
+    });
+    if (!REDUCE) $$(".fx", box).forEach((c, i) => { c.classList.add("a-rise"); c.style.animationDelay = (i * 40) + "ms"; });
+  } catch {
+    box.innerHTML = ""; box.append(h("div", "mini", "Couldn't load the NBA schedule. It retries automatically."));
+  }
+}
+
+async function predictNba() {
+  const out = $("#results");
+  const rid = ++S.run;
+  out.innerHTML = LOADER("replaying five seasons of NBA results…");
+  try {
+    const p = await api("/api/nba/predict", { home: S.home.id, away: S.away.id, neutral: $("#neutral").checked });
+    if (rid !== S.run) return;
+    S.prediction = p;
+    renderNba(out, p);
+  } catch (e) {
+    if (rid !== S.run) return;
+    out.innerHTML = `<div class="err">${esc(e.message)}. If the server was asleep, give it a minute and try again.</div>`;
+  }
+}
+
+function nbaColors() {
+  const kh = kitColor(S.home?.color, true) || "#17A54B";
+  let ka = kitColor(S.away?.color, true) || "#2D7FF0";
+  if (cdist(kh, ka) < 95) ka = kitColor(S.away?.alt, true) || "#2D7FF0";
+  return [kh, ka];
+}
+
+function renderNba(out, p) {
+  const [kh, ka] = nbaColors();
+  const w = p.win_prob, pr = p.projected, inp = p.inputs;
+  const neutral = p.neutral_venue;
+  const bar = (label, prob, col, max) => `<div class="pair"><span class="tag" style="width:auto">${esc(label)}</span>
+      <div class="hbar"><div style="width:${prob / (max || 1) * 100}%;background:${col}"></div></div><span class="val">${pct(prob)}</span></div>`;
+  const mg = p.margins;
+  const mrows = [[`${p.home.name} by 11+`, mg.home_by_11_plus, kh], [`${p.home.name} by 6-10`, mg.home_by_6_10, kh],
+    [`${p.home.name} by 1-5`, mg.home_by_1_5, kh], [`${p.away.name} by 1-5`, mg.away_by_1_5, ka],
+    [`${p.away.name} by 6-10`, mg.away_by_6_10, ka], [`${p.away.name} by 11+`, mg.away_by_11_plus, ka]];
+  const mmax = Math.max(...mrows.map(r => r[1]), 0.01);
+  const injList = (t, col) => t.injuries.length
+    ? t.injuries.map(i => `<div class="inj"><span><b style="color:${col}">${esc(i.player)}</b>${i.ppg ? ` <span class="mini">${i.ppg} ppg</span>` : ""}</span><span class="st ${/out/i.test(i.status) ? "out" : ""}">${esc(i.status)}${i.detail ? ` · ${esc(i.detail)}` : ""}</span></div>`).join("")
+    : `<div class="mini">No one listed on the injury report.</div>`;
+  const restTxt = (t) => t.rest_days <= 1 ? `second night of a back-to-back (${-NBA_B2B} pts)` : t.rest_days >= 3 ? `${t.rest_days} days' rest` : `${t.rest_days} day's rest`;
+  const hist = p.elo_history;
+  out.innerHTML = `<div class="hero">
+    <div class="inner">
+      <div class="cols">
+        <div>${S.home?.logo ? `<img class="nbalogo" src="${esc(S.home.logo)}">` : ""}
+          <div class="team">${esc(p.home.name)}</div><div class="sidetag">${neutral ? "neutral court" : "home"}</div>
+          <div class="pct count" style="color:${kh}">${pct(w.home)}</div><div class="fair">fair ${odds(w.fair_odds.home)}</div></div>
+        <div><div class="drawlbl">PROJECTED</div><div class="score">${pr.home.toFixed(0)}–${pr.away.toFixed(0)}<small>${esc(pr.spread)} · total ${pr.total.toFixed(1)}</small></div></div>
+        <div>${S.away?.logo ? `<img class="nbalogo" src="${esc(S.away.logo)}">` : ""}
+          <div class="team">${esc(p.away.name)}</div><div class="sidetag">${neutral ? "neutral court" : "away"}</div>
+          <div class="pct count" style="color:${ka}">${pct(w.away)}</div><div class="fair">fair ${odds(w.fair_odds.away)}</div></div>
+      </div>
+      <div class="stack"><div style="width:${w.home*100}%;background:${kh}"></div><div style="width:${w.away*100}%;background:${ka}"></div></div>
+      <div class="tiles">
+        <div class="tile"><b style="color:#5CE690">${inp.home_court_pts > 0 ? "+" + inp.home_court_pts : "0"}</b><span>home court, in points</span></div>
+        <div class="tile"><b style="color:${inp.rest_adjust ? "#FFD27A" : "#fff"}">${inp.rest_adjust > 0 ? "+" : ""}${inp.rest_adjust || 0}</b><span>rest edge</span></div>
+        <div class="tile"><b style="color:${inp.injury_adjust ? "#FFD27A" : "#fff"}">${inp.injury_adjust > 0 ? "+" : ""}${inp.injury_adjust || 0}</b><span>injury edge</span></div>
+      </div>
+      <button class="mathbtn" id="mathbtn">${ICONS.divide} The math, with this game's numbers</button>
+    </div></div>
+    <div class="duo">
+      <div class="card"><h3 class="sec">${ICONS.grid} Winning margin <span class="note">how far apart they finish</span></h3>
+        ${mrows.map(([l, v, c]) => bar(l, v, c, mmax)).join("")}
+        <div class="mini" style="margin-top:8px">${esc(p.margin_note)}</div></div>
+      <div class="card"><h3 class="sec">${ICONS.clock} At half-time</h3>
+        ${bar(`${p.home.name} ahead`, p.half_time.home, kh)}${bar(`${p.away.name} ahead`, p.half_time.away, ka)}
+        <div class="mini">Projected half-time score ${p.half_time.proj_home}–${p.half_time.proj_away}. Half-time leads carry about half the full-game margin.</div></div>
+    </div>
+    <div class="duo">
+      <div class="card"><h3 class="sec">${ICONS.bar} Spread lines <span class="note">chance each side covers</span></h3>
+        <div class="linerow mini"><span>line</span><span>${esc(p.home.name)}</span><span></span><span>${esc(p.away.name)}</span><span></span></div>
+        ${p.spreads.map(s => `<div class="linerow"><b>${s.line > 0 ? "+" : ""}${s.line}</b><div class="hbar"><div style="width:${s.home_cover*100}%;background:${kh}"></div></div><span>${pct(s.home_cover, 0)}</span><div class="hbar"><div style="width:${s.away_cover*100}%;background:${ka}"></div></div><span>${pct(s.away_cover, 0)}</span></div>`).join("")}
+        <div class="mini">Lines are from ${esc(p.home.name)}'s side: a negative number means they are giving points.</div></div>
+      <div class="card"><h3 class="sec">${ICONS.list} Total points <span class="note">over / under</span></h3>
+        <div class="linerow mini"><span>line</span><span>over</span><span></span><span>under</span><span></span></div>
+        ${p.totals.map(t => `<div class="linerow"><b>${t.line}</b><div class="hbar"><div style="width:${t.over*100}%;background:var(--green)"></div></div><span>${pct(t.over, 0)}</span><div class="hbar"><div style="width:${t.under*100}%;background:#9AA69C"></div></div><span>${pct(t.under, 0)}</span></div>`).join("")}
+        <div class="mini">Projected total ${pr.total.toFixed(1)}; typical game-to-game spread about ${inp.sd_total} points.</div></div>
+    </div>
+    <div class="duo">
+      <div class="card"><h3 class="sec">${ICONS.users} Injuries and rest</h3>
+        <div class="mini" style="margin-bottom:6px"><b>${esc(p.home.name)}</b> · ${restTxt(p.home)}</div>${injList(p.home, kh)}
+        <div class="mini" style="margin:12px 0 6px"><b>${esc(p.away.name)}</b> · ${restTxt(p.away)}</div>${injList(p.away, ka)}
+        <div class="mini" style="margin-top:8px">Players listed out cost their side about half their scoring average; doubtful or questionable players a quarter. Load-management "rest" tags are not priced.</div></div>
+      <div class="card"><h3 class="sec">${ICONS.repeat} Head to head <span class="note">most recent first</span></h3>
+        ${p.h2h.length ? p.h2h.map(g => `<div class="inj"><span>${esc(g.date)} · ${esc(g.away)} @ <b>${esc(g.home)}</b></span><span class="st">${esc(g.score)}</span></div>`).join("") : `<div class="mini">No meetings in the stored seasons.</div>`}
+        <div class="mini" style="margin-top:10px">Ratings now: ${esc(p.home.name)} ${p.home.elo} · ${esc(p.away.name)} ${p.away.elo}${hist.home.length ? ` · ${hist.home.length} most recent games tracked` : ""}</div></div>
+    </div>
+    ${(p.caveats || []).map(c => `<div class="caveat">${ICONS.warn} ${esc(c)}</div>`).join("")}`;
+  $("#mathbtn").onclick = () => openNbaMath(p);
+  animateIn(out);
+}
+const NBA_B2B = 1.4;
+
+function openNbaMath(p) {
+  const inp = p.inputs, pr = p.projected;
+  const ov = h("div", "overlay", `<div class="modal">
+    <h2>The math, with this game's numbers</h2>
+    <p><b class="k">1. Rating gap.</b> Every team carries an Elo rating that moves after each game by how unexpected the result was and by how big the margin was. ${esc(p.home.name)} ${p.home.elo} against ${esc(p.away.name)} ${p.away.elo}${inp.home_court_pts ? `, plus home court,` : ""} is a gap of <b class="k">${inp.elo_gap > 0 ? "+" : ""}${inp.elo_gap}</b> rating points.</p>
+    <p><b class="k">2. Points from ratings.</b> On five seasons of results, 28 rating points are worth about one point of margin, so that gap is a <b class="k">${(inp.elo_gap * 0.0352).toFixed(1)}-point</b> edge before anything else. Home court adds ${inp.home_court_pts} points${inp.rest_adjust ? `, rest adds ${inp.rest_adjust}` : ""}${inp.injury_adjust ? `, and listed injuries add ${inp.injury_adjust}` : ""}: projected margin <b class="k">${pr.margin > 0 ? "+" : ""}${pr.margin}</b>.</p>
+    <p><b class="k">3. From a margin to a probability.</b> Actual margins scatter around the projection with a spread of about ${inp.sd_margin} points (measured, not assumed). The share of that bell curve above zero is the win probability: <b class="k">${pct(p.win_prob.home)}</b> for ${esc(p.home.name)}. Every spread line is the same curve cut at a different point.</p>
+    <p><b class="k">4. The total.</b> Each side's recent scoring, weighted toward the last few weeks, against the other side's recent defending gives a projected total of <b class="k">${pr.total.toFixed(1)}</b>; totals scatter with a spread of about ${inp.sd_total} points, which prices every over/under line.</p>
+    <p><b class="k">5. How good is this?</b> Replayed on the most recent full season without peeking, the model picked the winner about two games in three and missed the spread by roughly 12 points on average, in line with published Elo benchmarks. The books do a little better, which is why the Vs Market page blends their number with ours instead of trusting either alone.</p>
+    <button class="btn" id="mclose">Close</button></div>`);
+  document.body.appendChild(ov);
+  ov.onclick = (e) => { if (e.target === ov || e.target.id === "mclose") ov.remove(); };
+}
+
+async function renderNbaAbout() {
+  const page = $("#page-about");
+  $("#nba-about")?.remove();
+  try {
+    const m = await api("/api/nba/meta");
+    const card = h("div", "card", `<h3 class="sec">Basketball (NBA)</h3>
+      <p class="sub" style="margin-bottom:8px">${m.games ? `Walk-forward on the last full season (${m.eval.games} games): picked the winner <b>${pct(m.eval.accuracy, 1)}</b> of the time, Brier ${m.eval.brier}, average spread error ${m.eval.spread_mae} points.` : ""} Fitted: one point of margin per ${(1 / m.fit.points_per_elo).toFixed(0)} rating points, home court ${m.fit.home_court_pts} points, margin spread ${m.fit.sd_margin}, total spread ${m.fit.sd_total}. Results stored ${esc(m.data_from)} to ${esc(m.data_to)}, refreshed daily.</p>
+      <p class="mini">${esc(m.note)}</p>`);
+    card.id = "nba-about"; page.appendChild(card);
+  } catch { /* about stays football-only if the basketball model is unavailable */ }
 }

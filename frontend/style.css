@@ -261,3 +261,17 @@ h3.sec svg { width: 16px; height: 16px; stroke: var(--muted); flex-shrink: 0; }
 .switch input:checked + .track { background: var(--green); }
 .switch input:checked + .track .thumb { transform: translateX(20px); }
 .switch input:focus-visible + .track { outline: 2px solid var(--green); outline-offset: 2px; }
+
+/* ---------- sport switch + basketball ---------- */
+.sportsw { display: flex; gap: 4px; background: var(--panel2); border-radius: 12px; padding: 4px; margin: 0 6px 14px; }
+.sportsw button { flex: 1; padding: 8px 6px; border-radius: 9px; font-size: 13px; font-weight: 700; color: var(--dim); }
+.sportsw button.on { background: var(--panel); color: var(--green-deep); box-shadow: var(--shadow); }
+.sport-nba .fb-only { display: none; }
+.hero .score { font-size: 54px; font-weight: 900; letter-spacing: -2px; line-height: 1; margin-top: 10px; }
+.hero .score small { font-size: 16px; font-weight: 600; letter-spacing: 0; color: rgba(255,255,255,.75); display: block; margin-top: 6px; }
+.linerow { display: grid; grid-template-columns: 90px 1fr 60px 1fr 60px; align-items: center; gap: 10px; font-size: 13.5px; padding: 6px 0; border-bottom: 1px solid var(--panel2); }
+.linerow b { font-weight: 700; }
+.inj { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; padding: 5px 0; border-bottom: 1px solid var(--panel2); }
+.inj .st { color: var(--muted); white-space: nowrap; }
+.inj .st.out { color: var(--red); font-weight: 700; }
+.nbalogo { width: 60px; height: 60px; object-fit: contain; margin-bottom: 8px; }

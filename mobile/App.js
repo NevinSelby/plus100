@@ -4,7 +4,7 @@
    cloud (server address editable in Settings). */
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { Feather, Ionicons } from "@expo/vector-icons";
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo, ActivityIndicator, Animated, Easing, Image, LayoutAnimation,
   Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Switch, Text,
@@ -139,6 +139,7 @@ function Root() {
   const [oddsFormat, setOddsFormat] = useState("decimal");
   const [bankroll, setBankroll] = useState("");
   const [fplId, setFplId] = useState("");
+  const [sport, setSport] = useState("football");
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState("predict");
   const [home, setHome] = useState(null);
@@ -232,6 +233,7 @@ function Root() {
           if (sv.oddsFormat) { setOddsFormat(sv.oddsFormat); ODDS_FMT = sv.oddsFormat; }
           if (sv.bankroll != null) setBankroll(String(sv.bankroll));
           if (sv.fplId != null) setFplId(String(sv.fplId));
+          if (sv.sport === "basketball" || sv.sport === "football") setSport(sv.sport);
         } catch { /* corrupt settings: fall back to defaults */ }
       }
         clearTimeout(failsafe);
@@ -245,28 +247,33 @@ function Root() {
   }, []);
 
   const saveSettings = (patch) => {
-    const merged = { server, oddsFormat, bankroll, fplId, ...patch };
+    const merged = { server, oddsFormat, bankroll, fplId, sport, ...patch };
     AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(merged)).catch(() => {});
     if (patch.server != null) setServer(patch.server);
     if (patch.oddsFormat != null) { setOddsFormat(patch.oddsFormat); ODDS_FMT = patch.oddsFormat; }
     if (patch.bankroll != null) setBankroll(patch.bankroll);
     if (patch.fplId != null) setFplId(patch.fplId);
+    if (patch.sport != null) setSport(patch.sport);
   };
 
   const shared = {
     api, home, away, setHome, setAway, neutral, setNeutral,
     prediction, setPrediction, h2h, setH2h, meta,
-    server, oddsFormat, bankroll, fplId, saveSettings,
+    server, oddsFormat, bankroll, fplId, saveSettings, sport,
     openDetails: () => setShowDetails(true),
   };
 
   const TABS = [
     ["predict", "crosshair", "Predict"],
     ["bets", "bar-chart-2", "Vs Market"],
-    ["parlays", "layers", "Parlays"],
-    ["fpl", "award", "Fantasy"],
+    ...(sport === "basketball" ? [] : [["parlays", "layers", "Parlays"], ["fpl", "award", "Fantasy"]]),
     ["settings", "settings", "Settings"],
   ];
+  const switchSport = (sp) => {
+    if (sp === sport) return;
+    springy(); saveSettings({ sport: sp });
+    if (sp === "basketball" && (tab === "parlays" || tab === "fpl")) setTab("predict");
+  };
 
   if (!ready) return <View style={s.root} />;
   return (
@@ -276,6 +283,14 @@ function Root() {
         <View style={s.row}>
           <View style={s.logoMark}><Text style={s.logoPlus}>+</Text></View>
           <Text style={[s.wordmark, { marginLeft: 10 }]}>Plus100</Text>
+        </View>
+        <View style={s.sportSw} accessibilityRole="tablist">
+          {[["football", "Football"], ["basketball", "Basketball"]].map(([k, label]) => (
+            <Pressable key={k} onPress={() => switchSport(k)} accessibilityRole="tab"
+              style={[s.sportBtn, sport === k && s.sportBtnOn]}>
+              <Text style={[s.sportTxt, sport === k && s.sportTxtOn]}>{label}</Text>
+            </Pressable>
+          ))}
         </View>
       </View>
 
@@ -294,7 +309,7 @@ function Root() {
       )}
 
       <TabFade key={tab} style={{ flex: 1 }}>
-        {tab === "predict" && <PredictScreen {...shared} />}
+        {tab === "predict" && (sport === "basketball" ? <NbaPredictScreen {...shared} /> : <PredictScreen {...shared} />)}
         {tab === "bets" && <BestBetsScreen {...shared} />}
         {tab === "parlays" && <ParlaysScreen {...shared} />}
         {tab === "fpl" && <FPLScreen {...shared} />}
@@ -1492,7 +1507,247 @@ function PredictScreen(props) {
 }
 
 /* ================= vs market ================= */
-function BestBetsScreen({ api, home, away, bankroll }) {
+/* ================= basketball: NBA predict screen ================= */
+function NbaFixturesRow({ api, onLoad }) {
+  const [fx, setFx] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api("/api/nba/fixtures", { days: 7 }).then((d) => { if (alive) setFx(d.fixtures || []); }).catch(() => { if (alive) setFx([]); });
+    return () => { alive = false; };
+  }, []);
+  if (!fx || fx.length === 0) return null;
+  return (
+    <View style={{ marginTop: 22 }}>
+      <SectionTitle icon="calendar" note="official schedule, next 7 days">Tipping off soon</SectionTitle>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 10, paddingRight: 8 }}>
+        {fx.map((f, i) => {
+          const d = new Date(f.kickoff);
+          const when = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+          return (
+            <PressScale key={i} style={s.mqCard} onPress={() => onLoad(f.home, f.away)}>
+              <Text style={s.mqTag} numberOfLines={1}>{f.league}</Text>
+              <Text style={[s.optName, { marginTop: 6, fontSize: 13.5 }]} numberOfLines={1}>{f.away}</Text>
+              <Text style={[s.optName, { fontSize: 13.5 }]} numberOfLines={1}>@ {f.home}</Text>
+              <Text style={[s.mqNames, TNUM]} numberOfLines={1}>{when}{f.book_line ? ` · ${f.book_line}` : ""}{f.book_total ? ` · O/U ${f.book_total}` : ""}</Text>
+            </PressScale>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
+function NbaPredictScreen({ api, meta }) {
+  const [teams, setTeams] = useState(null);
+  const [home, setHome] = useState(null);
+  const [away, setAway] = useState(null);
+  const [neutral, setNeutral] = useState(false);
+  const [active, setActive] = useState(null);
+  const [q, setQ] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [p, setP] = useState(null);
+  const runId = useRef(0);
+  useEffect(() => {
+    let alive = true;
+    api("/api/nba/teams").then((t) => alive && setTeams(t)).catch((e) => alive && setErr(String(e.message)));
+    return () => { alive = false; };
+  }, []);
+  const byName = useMemo(() => Object.fromEntries((teams || []).map((t) => [t.name, t])), [teams]);
+  const pick = (slot, t) => { springy(); (slot === "home" ? setHome : setAway)(t); setActive(slot === "home" && !away ? "away" : null); setQ(""); };
+  const run = async (h = home, a = away, n = neutral) => {
+    if (!h || !a) return;
+    const id = ++runId.current;
+    setBusy(true); setErr(""); setActive(null);
+    try {
+      const d = await api("/api/nba/predict", { home: h.id, away: a.id, neutral: n });
+      if (runId.current !== id) return;
+      setP(d);
+    } catch (e) { if (runId.current === id) setErr(String(e.message)); }
+    if (runId.current === id) setBusy(false);
+  };
+  const loadPair = (hn, an) => { const h = byName[hn], a = byName[an]; if (!h || !a) return; setHome(h); setAway(a); setNeutral(false); run(h, a, false); };
+  const swap = () => { if (!home || !away) return; springy(); const h = home; setHome(away); setAway(h); if (p) run(away, h, neutral); };
+  const opts = (teams || []).filter((t) => q.trim().length >= 1 && (t.name.toLowerCase().includes(q.toLowerCase()) || (t.abbr || "").toLowerCase() === q.toLowerCase())).slice(0, 6);
+  const kitH = kitColor(home?.color, true) || C.lime;
+  let kitA = kitColor(away?.color, true) || C.sky;
+  if (colorDist(kitH, kitA) < 95) kitA = kitColor(away?.alt, true) || C.sky;
+
+  const Slot = ({ slot, team }) => (
+    <PressScale style={[s.slotCard, active === slot && s.slotCardOn]} containerStyle={{ flex: 1 }}
+      onPress={() => { springy(); setActive(active === slot ? null : slot); }}>
+      <View style={s.slotSideTag}><Text style={s.slotSideTxt}>{slot === "home" ? "HOME" : "AWAY"}</Text></View>
+      {team?.logo ? <Image source={{ uri: team.logo }} style={s.slotBadge} /> : <View style={[s.slotBadge, { backgroundColor: C.panel2, alignItems: "center", justifyContent: "center" }]}><Feather name="plus" size={20} color={C.muted} /></View>}
+      <Text style={s.slotName} numberOfLines={1}>{team ? team.name : `Pick ${slot}`}</Text>
+      <Text style={[s.slotSub, TNUM]}>{team ? `NBA · Elo ${team.elo}` : "tap to search"}</Text>
+    </PressScale>
+  );
+
+  const Row = ({ label, prob, color, max = 1, pctDigits = 0 }) => (
+    <View style={s.mktRow}>
+      <Text style={s.mktLabel} numberOfLines={1}>{label}</Text>
+      <View style={{ flex: 1, marginHorizontal: 10 }}><HBar frac={prob / max} color={color} height={6} /></View>
+      <Text style={[s.mktVal, TNUM]}>{(prob * 100).toFixed(pctDigits)}%</Text>
+    </View>
+  );
+
+  return (
+    <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
+      {!p && !busy && (
+        <View style={s.banner}>
+          <GradientBG id="welcome-nba" from="#1CB258" to="#0B7A38" rounded={20} style={{ left: -18, right: -18, top: -18, bottom: -18 }} />
+          <View style={{ flex: 1, paddingRight: 10 }}>
+            <Text style={s.bannerKicker}>NBA</Text>
+            <Text style={s.bannerTitle}>Call any NBA game</Text>
+            <Text style={s.bannerSub}>Win probability, projected score, spread and total from five seasons of results, tonight's injury report and each side's rest.</Text>
+          </View>
+          <View style={{ zIndex: 2 }}><Feather name="dribbble" size={64} color="rgba(255,255,255,0.9)" /></View>
+        </View>
+      )}
+      <View style={s.slotRow}>
+        <Slot slot="home" team={home} />
+        <View style={s.vsWrap}>
+          <Text style={s.vsTxt}>VS</Text>
+          <Pressable disabled={!home || !away} onPress={swap} hitSlop={10} accessibilityLabel="Switch home and away"
+            style={[s.swapBtn, (!home || !away) && { opacity: 0.35 }]}><Feather name="repeat" size={15} color={C.dim} /></Pressable>
+        </View>
+        <Slot slot="away" team={away} />
+      </View>
+      {active && (
+        <View style={{ marginTop: 10 }}>
+          <TextInput style={s.input} value={q} onChangeText={setQ} autoFocus placeholder={`Search the ${active} team…`}
+            placeholderTextColor={C.muted} autoCorrect={false} />
+          {opts.length > 0 && (
+            <View style={s.dropdown}>
+              {opts.map((t) => (
+                <Pressable key={t.id} style={({ pressed }) => [s.opt, pressed && { backgroundColor: C.panel2 }]} onPress={() => pick(active, t)}>
+                  <View style={[s.row, { gap: 10 }]}>
+                    {t.logo ? <Image source={{ uri: t.logo }} style={{ width: 26, height: 26 }} /> : null}
+                    <View><Text style={s.optName}>{t.name}</Text><Text style={[s.optSub, TNUM]}>NBA · elo {t.elo}</Text></View>
+                  </View>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          {teams && q.trim().length >= 2 && opts.length === 0 && <Text style={[s.axisNote, { marginTop: 8 }]}>No team matches "{q}".</Text>}
+        </View>
+      )}
+      <PressScale disabled={!home || !away || busy} onPress={() => run()} style={[s.cta, (!home || !away || busy) && s.btnOff]}>
+        <GradientBG id="cta-nba" from="#1FB25A" to="#0B7A38" rounded={16} />
+        <Feather name="zap" size={17} color={C.onAccent} />
+        <Text style={s.ctaTxt}>{busy ? "Computing…" : "Predict this game"}</Text>
+      </PressScale>
+      <View style={[s.row, { marginTop: 14, justifyContent: "center" }]}>
+        <Switch value={neutral} onValueChange={setNeutral} trackColor={{ true: C.lime, false: C.line }} thumbColor="#FFFFFF" />
+        <Text style={s.dimTxt}>  neutral court</Text>
+      </View>
+      {!!err && <Text style={s.errTxt}>{err}. If this keeps happening, check the server address in Settings.</Text>}
+      {busy && <BallLoader label="Replaying five seasons of NBA results…" />}
+      {!p && !busy && <NbaFixturesRow api={api} onLoad={loadPair} />}
+
+      {p && !busy && (() => {
+        const w = p.win_prob, pr = p.projected, inp = p.inputs, mg = p.margins;
+        const mrows = [[`${p.home.name} by 11+`, mg.home_by_11_plus, kitH], [`${p.home.name} by 6-10`, mg.home_by_6_10, kitH], [`${p.home.name} by 1-5`, mg.home_by_1_5, kitH],
+          [`${p.away.name} by 1-5`, mg.away_by_1_5, kitA], [`${p.away.name} by 6-10`, mg.away_by_6_10, kitA], [`${p.away.name} by 11+`, mg.away_by_11_plus, kitA]];
+        const mmax = Math.max(...mrows.map((r) => r[1]), 0.01);
+        const rest = (t) => t.rest_days <= 1 ? "second night of a back-to-back" : `${t.rest_days} days' rest`;
+        const Inj = ({ t, color }) => (
+          <View style={{ marginTop: 8 }}>
+            <Text style={[s.smallLabel, { color }]}>{t.name} · {rest(t)}</Text>
+            {t.injuries.length === 0 ? <Text style={s.axisNote}>No one on the injury report.</Text>
+              : t.injuries.map((i, k) => (
+                <View key={k} style={s.rowBetween}>
+                  <Text style={s.dimTxt} numberOfLines={1}>{i.player}{i.ppg ? ` · ${i.ppg} ppg` : ""}</Text>
+                  <Text style={[s.smallLabel, /out/i.test(i.status) && { color: C.red, fontWeight: "700" }]}>{i.status}{i.detail ? ` · ${i.detail}` : ""}</Text>
+                </View>))}
+          </View>
+        );
+        return (
+          <>
+            <Card delay={0} style={s.heroCard}>
+              <GradientBG id="hero-nba" from="#0B1F12" to="#16251A" rounded={22} style={{ left: -20, right: -20, top: -20, bottom: -20 }} />
+              <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
+                <View style={{ flex: 1, alignItems: "center" }}>
+                  {home?.logo ? <Image source={{ uri: home.logo }} style={{ width: 54, height: 54 }} /> : null}
+                  <Text style={[s.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.home.name}</Text>
+                  <View style={s.heroSideTag}><Text style={s.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "HOME"}</Text></View>
+                  <CountUp value={w.home * 100} decimals={1} suffix="%" style={[s.heroPct, { color: kitH }]} />
+                  <Text style={s.heroFair}>fair {fmtOdds(w.fair_odds.home)}</Text>
+                </View>
+                <View style={{ alignItems: "center", paddingTop: 26, width: 118 }}>
+                  <Text style={s.heroDrawLbl}>PROJECTED</Text>
+                  <Text style={[s.heroDraw, TNUM, { fontSize: 30 }]}>{pr.home.toFixed(0)}–{pr.away.toFixed(0)}</Text>
+                  <Text style={[s.heroFair, { textAlign: "center" }]}>{pr.spread}{"\n"}total {pr.total.toFixed(1)}</Text>
+                </View>
+                <View style={{ flex: 1, alignItems: "center" }}>
+                  {away?.logo ? <Image source={{ uri: away.logo }} style={{ width: 54, height: 54 }} /> : null}
+                  <Text style={[s.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.away.name}</Text>
+                  <View style={s.heroSideTag}><Text style={s.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "AWAY"}</Text></View>
+                  <CountUp value={w.away * 100} decimals={1} suffix="%" style={[s.heroPct, { color: kitA }]} />
+                  <Text style={s.heroFair}>fair {fmtOdds(w.fair_odds.away)}</Text>
+                </View>
+              </View>
+              <StackBar segs={[{ frac: w.home, color: kitH }, { frac: w.away, color: kitA }]} />
+              <View style={s.tileRow}>
+                <StatTile label="home court, pts" value={inp.home_court_pts > 0 ? `+${inp.home_court_pts}` : "0"} color={C.lime} dark />
+                <StatTile label="rest edge" value={`${inp.rest_adjust > 0 ? "+" : ""}${inp.rest_adjust || 0}`} color={inp.rest_adjust ? C.amber : "#fff"} dark />
+                <StatTile label="injury edge" value={`${inp.injury_adjust > 0 ? "+" : ""}${inp.injury_adjust || 0}`} color={inp.injury_adjust ? C.amber : "#fff"} dark />
+              </View>
+            </Card>
+            <Card delay={70}>
+              <SectionTitle icon="grid" note="how far apart they finish">Winning margin</SectionTitle>
+              {mrows.map(([l, v, c]) => <Row key={l} label={l} prob={v} color={c} max={mmax} />)}
+              <Text style={[s.dimTxt, { marginTop: 8 }]}>{p.margin_note}</Text>
+            </Card>
+            <Card delay={100}>
+              <SectionTitle icon="bar-chart-2" note={`${p.home.name} covers`}>Spread lines</SectionTitle>
+              {p.spreads.map((x) => <Row key={x.line} label={`${x.line > 0 ? "+" : ""}${x.line}`} prob={x.home_cover} color={kitH} />)}
+              <Text style={s.axisNote}>negative = {p.home.name} giving points; the other side's cover chance is the remainder</Text>
+              <SectionTitle icon="list" note="over">Total points</SectionTitle>
+              {p.totals.map((x) => <Row key={x.line} label={`${x.line}`} prob={x.over} color={C.lime} />)}
+              <Text style={s.axisNote}>projected total {pr.total.toFixed(1)}; typical spread about {inp.sd_total} points</Text>
+            </Card>
+            <Card delay={130}>
+              <SectionTitle icon="clock">At half-time</SectionTitle>
+              <Row label={`${p.home.name} ahead`} prob={p.half_time.home} color={kitH} />
+              <Row label={`${p.away.name} ahead`} prob={p.half_time.away} color={kitA} />
+              <Text style={s.axisNote}>projected half-time {p.half_time.proj_home}–{p.half_time.proj_away}</Text>
+            </Card>
+            <Card delay={160}>
+              <SectionTitle icon="users">Injuries and rest</SectionTitle>
+              <Inj t={p.home} color={kitH} /><Inj t={p.away} color={kitA} />
+              <Text style={[s.axisNote, { marginTop: 8 }]}>Listed-out players cost about half their scoring average; doubtful or questionable a quarter. Load-management rest tags are not priced.</Text>
+            </Card>
+            {(p.h2h || []).length > 0 && (
+              <Card delay={190}>
+                <SectionTitle icon="repeat" note="most recent first">Head to head</SectionTitle>
+                {p.h2h.map((g, i) => (
+                  <View key={i} style={s.meetRow}>
+                    <Text style={[s.meetDate, TNUM]}>{g.date.slice(0, 7)}</Text>
+                    <Text style={s.meetMatch} numberOfLines={1}>{g.away} @ {g.home}</Text>
+                    <Text style={[s.meetScore, TNUM]}>{g.score}</Text>
+                  </View>))}
+                <SectionTitle icon="trending-up">Strength over time (Elo)</SectionTitle>
+                <EloLineChart histHome={p.elo_history.home} histAway={p.elo_history.away} nameHome={p.home.name} nameAway={p.away.name} />
+              </Card>
+            )}
+            <Card delay={220}>
+              <SectionTitle icon="divide">The math, with this game's numbers</SectionTitle>
+              <Text style={s.dimTxt}>Rating gap {inp.elo_gap > 0 ? "+" : ""}{inp.elo_gap} (one point of margin per 28 rating points) → {(inp.elo_gap * 0.0352).toFixed(1)} points, plus home court {inp.home_court_pts}{inp.rest_adjust ? `, rest ${inp.rest_adjust}` : ""}{inp.injury_adjust ? `, injuries ${inp.injury_adjust}` : ""}: projected margin {pr.margin > 0 ? "+" : ""}{pr.margin}. Actual margins scatter around that by about {inp.sd_margin} points, so the share of the curve above zero is the win chance, and every spread line is the same curve cut elsewhere. The total comes from each side's recent scoring against the other's recent defending.</Text>
+            </Card>
+            {(p.caveats || []).map((c, i) => (
+              <View key={i} style={s.caveatRow}><Feather name="alert-triangle" size={13} color={C.amber} /><Text style={s.caveat}> {c}</Text></View>
+            ))}
+            <NbaFixturesRow api={api} onLoad={loadPair} />
+          </>
+        );
+      })()}
+    </ScrollView>
+  );
+}
+
+function BestBetsScreen({ api, home, away, bankroll, sport }) {
+  const nba = sport === "basketball";
   const [busy, setBusy] = useState(false);
   const [data, setData] = useState(null);
   const [err, setErr] = useState("");
@@ -1500,8 +1755,8 @@ function BestBetsScreen({ api, home, away, bankroll }) {
   const run = async () => {
     setBusy(true); setErr(""); setData(null);
     try {
-      const params = home && away ? { home: home.id, away: away.id } : undefined;
-      setData(await api("/api/bestbets", params));
+      const params = !nba && home && away ? { home: home.id, away: away.id } : undefined;
+      setData(await api(nba ? "/api/nba/bestbets" : "/api/bestbets", params));
     } catch (e) { setErr(String(e.message)); }
     setBusy(false);
   };
@@ -1522,7 +1777,7 @@ function BestBetsScreen({ api, home, away, bankroll }) {
       <Pressable style={({ pressed }) => [s.btn, busy && s.btnOff,
         { marginTop: 14, alignItems: "center" }, pressed && { opacity: 0.8 }]}
         disabled={busy} onPress={run}>
-        <Text style={s.btnTxt}>{busy ? "Checking prices…" : home && away ? `Grade ${home.name} v ${away.name}` : "Scan the next two days"}</Text>
+        <Text style={s.btnTxt}>{busy ? "Checking prices…" : nba ? "Scan NBA games, next two days" : home && away ? `Grade ${home.name} v ${away.name}` : "Scan the next two days"}</Text>
       </Pressable>
       {!!err && <Text style={s.errTxt}>{err}</Text>}
       {busy && <BallLoader label="Shopping 15 sportsbooks for prices…" />}
@@ -2050,14 +2305,16 @@ function AboutModalBody({ onClose, meta }) {
           <Feather name="x" size={22} color={C.chalk} />
         </Pressable>
       </View>
-      <AboutScreen meta={meta} />
+      <AboutScreen meta={meta} api={api} />
     </View>
   );
 }
 
 /* ================= about ================= */
 
-function AboutScreen({ meta }) {
+function AboutScreen({ meta, api }) {
+  const [nm, setNm] = useState(null);
+  useEffect(() => { let alive = true; api && api("/api/nba/meta").then((d) => alive && setNm(d)).catch(() => {}); return () => { alive = false; }; }, []);
   const S = ({ title, children }) => (
     <View>
       <Text style={s.h3}>{title}</Text>
@@ -2080,6 +2337,15 @@ function AboutScreen({ meta }) {
           <StatTile label="bookmakers" value={`${(live.book_accuracy * 100).toFixed(1)}%`} color={C.sky} />
         </View>
       )}
+      {nm && nm.games ? (
+        <S title="Basketball (NBA)">
+          Replayed on the most recent full season without peeking ({nm.eval.games} games), the model picked
+          the winner {(nm.eval.accuracy * 100).toFixed(1)}% of the time and missed the spread by {nm.eval.spread_mae} points
+          on average, in line with published Elo benchmarks. One point of margin per {(1 / nm.fit.points_per_elo).toFixed(0)} rating
+          points, home court worth {nm.fit.home_court_pts}, margin spread {nm.fit.sd_margin}, total spread {nm.fit.sd_total}.
+          Results {nm.data_from} to {nm.data_to}, refreshed daily; injuries and rest priced from the live report.
+        </S>
+      ) : null}
       <S title="Probabilities are not certainty">
         A 60% chance fails 4 times out of 10. Even the strongest "good bet" flagged here loses
         regularly. Edges only show up as profit across many bets. There is no 100% win rate,
@@ -2262,6 +2528,11 @@ const makeStyles = (C) => StyleSheet.create({
   root: { flex: 1, backgroundColor: C.bg },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between",
     paddingHorizontal: 20, paddingVertical: 14, gap: 12 },
+  sportSw: { flexDirection: "row", backgroundColor: C.panel2, borderRadius: 11, padding: 3 },
+  sportBtn: { paddingHorizontal: 11, paddingVertical: 6, borderRadius: 8 },
+  sportBtnOn: { backgroundColor: C.panel, shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 4, elevation: 1 },
+  sportTxt: { fontSize: 12.5, fontWeight: "600", color: C.dim },
+  sportTxtOn: { color: C.lime, fontWeight: "800" },
   logoMark: { width: 34, height: 34, borderRadius: 10, backgroundColor: C.lime,
     alignItems: "center", justifyContent: "center" },
   logoPlus: { color: C.onAccent, fontSize: 24, fontWeight: "800", marginTop: -2 },
