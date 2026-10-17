@@ -126,6 +126,7 @@ const lastName = (n) => n.split(" ").slice(-1)[0];
 /* ---- global state ---- */
 const S = { home: null, away: null, prediction: null, meta: null, nbaMeta: null, run: 0,
             sport: localStorage.getItem("plus100.sport") || "football", nbaTeams: null,
+            theme: localStorage.getItem("plus100.theme") || "auto", dark: false,
             kickoff: null };    // the fixture's tip-off when the matchup came from the rail
 
 /* ---- navigation ---- */
@@ -806,8 +807,7 @@ function applySport() {
   $$("#sportsw button").forEach(b => b.classList.toggle("on", b.dataset.sport === S.sport));
   $("#predict-h1").textContent = nba ? "Call any NBA game" : "Call any match on the planet";
   document.title = nba ? "Plus100 · NBA predictions" : "Plus100 · Football predictions";
-  $('meta[name="theme-color"]').content = nba ? "#0C0D11" : "#F2F7F0";
-  document.documentElement.style.colorScheme = nba ? "dark" : "light";
+  applyTheme();
   $("#railtitle").textContent = nba ? "Tipping off soon" : "Kicking off soon";
   $("#fixtures").classList.toggle("card", nba);
   $("#market-sub").textContent = nba
@@ -828,6 +828,23 @@ function applySport() {
   $("#fixtures").innerHTML = LOADER(nba ? "fetching tonight's schedule…" : "fetching the real schedule…");
   loadFixtures();
 }
+/* basketball appearance: light cream court by default, dark arena when the system
+   or the switch says so; football has one light theme and ignores this */
+const MQ_DARK = matchMedia("(prefers-color-scheme: dark)");
+function applyTheme() {
+  const nba = S.sport === "basketball";
+  S.dark = nba && (S.theme === "dark" || (S.theme === "auto" && MQ_DARK.matches));
+  document.body.classList.toggle("dark", S.dark);
+  $$("#themesw button").forEach(b => b.classList.toggle("on", b.dataset.theme === S.theme));
+  $('meta[name="theme-color"]').content = S.dark ? "#0C0D11" : nba ? "#FBF4EC" : "#F2F7F0";
+  document.documentElement.style.colorScheme = S.dark ? "dark" : "light";
+}
+const rethemeResult = () => { if (S.prediction && S.sport === "basketball" && S.home && S.away) predictNow(); };
+MQ_DARK.addEventListener("change", () => { if (S.theme === "auto") { applyTheme(); rethemeResult(); } });
+$("#themesw").addEventListener("click", (e) => {
+  const b = e.target.closest("button"); if (!b || b.dataset.theme === S.theme) return;
+  S.theme = b.dataset.theme; localStorage.setItem("plus100.theme", S.theme); applyTheme(); rethemeResult();
+});
 $("#sportsw").addEventListener("click", (e) => {
   const b = e.target.closest("button"); if (!b || b.dataset.sport === S.sport) return;
   S.sport = b.dataset.sport; localStorage.setItem("plus100.sport", S.sport); applySport();
@@ -882,9 +899,12 @@ function predictNba() {
 }
 
 function nbaColors() {
-  const kh = kitColor(S.home?.color, true) || "#F4F1EC";
-  let ka = kitColor(S.away?.color, true) || "#6FB1FF";
-  if (cdist(kh, ka) < 95) ka = kitColor(S.away?.alt, true) || "#6FB1FF";
+  // team colours tuned for the current surface: lifted on the dark court, deepened on the light one
+  const cs = getComputedStyle(document.body);
+  const fbH = cs.getPropertyValue("--fb-home").trim() || "#2A1A10", fbA = cs.getPropertyValue("--fb-away").trim() || "#2D7FF0";
+  const kh = kitColor(S.home?.color, S.dark) || fbH;
+  let ka = kitColor(S.away?.color, S.dark) || fbA;
+  if (cdist(kh, ka) < 95) ka = kitColor(S.away?.alt, S.dark) || fbA;
   return [kh, ka];
 }
 
@@ -913,7 +933,7 @@ function renderNba(out, p) {
     : t.rest_days > 10 ? `${t.rest_days} days since their last game`
     : t.rest_days >= 3 ? `${t.rest_days} days' rest` : `${t.rest_days} day's rest`;
   const hist = p.elo_history || {};
-  const under = "rgba(255,255,255,.28)";
+  const under = "var(--under)";
   const ab = (key) => (key === "home" ? S.home : S.away)?.abbr || p[key].name.toUpperCase();
   const favKey = pr.margin >= 0 ? "home" : "away";
   const spreadTxt = Math.abs(pr.margin) < 0.05 ? "pick 'em" : `${ab(favKey)} -${Math.abs(pr.margin).toFixed(1)}`;

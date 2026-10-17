@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" aria-hidden="true">
+  <defs>
+    <clipPath id="plL"><rect x="0" y="0" width="24" height="48"/></clipPath>
+    <clipPath id="plR"><rect x="24" y="0" width="24" height="48"/></clipPath>
+  </defs>
+  <g clip-path="url(#plL)">
+    <circle cx="24" cy="24" r="23" fill="#17A54B"/>
+    <polygon points="14,21 20,17 25,22 22,29 15,28" fill="#0B5E2F"/>
+    <path d="M14 21L7 17M20 17l1-8M25 22l7-2M22 29l3 7M15 28l-7 4" stroke="#0B5E2F" stroke-width="2" fill="none" stroke-linecap="round"/>
+  </g>
+  <g clip-path="url(#plR)">
+    <circle cx="24" cy="24" r="23" fill="#F2691D"/>
+    <path d="M24 1v46M24 24h23M33 2c-5 8-5 36 0 44" stroke="#5A2808" stroke-width="2" fill="none"/>
+  </g>
+  <circle cx="24" cy="24" r="23" fill="none" stroke="#fff" stroke-opacity=".9" stroke-width="1.5"/>
+  <path d="M24 13v22M13 24h22" stroke="#140A04" stroke-opacity=".35" stroke-width="9" stroke-linecap="round"/>
+  <path d="M24 13v22M13 24h22" stroke="#fff" stroke-width="6" stroke-linecap="round"/>
+</svg>

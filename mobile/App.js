@@ -8,10 +8,10 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   AccessibilityInfo, ActivityIndicator, Animated, Easing, Image, KeyboardAvoidingView,
   LayoutAnimation, Modal, Platform, Pressable, ScrollView, StatusBar, StyleSheet, Switch,
-  Text, TextInput, View,
+  Text, TextInput, View, useColorScheme,
 } from "react-native";
 import { SafeAreaProvider, useSafeAreaInsets } from "react-native-safe-area-context";
-import Svg, { Circle, Defs, G, Line, LinearGradient as SvgGrad, Polyline, Rect,
+import Svg, { Circle, ClipPath, Defs, G, Line, LinearGradient as SvgGrad, Path, Polygon, Polyline, Rect,
   Stop, Text as SvgText } from "react-native-svg";
 
 const DEFAULT_SERVER = "https://plus100.onrender.com";
@@ -34,12 +34,26 @@ const C_FOOTBALL = {
   loaderShadow: "#1A2B1E", secIcon: "#7C917E",
   // the two grass gradients: welcome banner + CTA, and the hero fallback
   gradFrom: "#1CB258", gradTo: "#0B7A38", heroFrom: "#188F46", heroTo: "#0A6B31",
+  underBar: "rgba(22,37,26,0.28)", fav: "#0C7A36", track: "#D9E5D4", thumb: "#FFFFFF", onDark: false,
 };
 /* Basketball: an arena scoreboard after the lights go down. Near-black hardwood
    charcoal, warm off-white ink, ONE orange accent, hairline structure. Every slot
    is remapped so no grass green reaches a basketball screen. */
 let C = C_FOOTBALL;
-const CB = { ...C_FOOTBALL, sport: "basketball",
+/* Basketball, light: a cream hardwood court, warm ink, the same single orange accent.
+   The default; the dark arena below is chosen in Settings or by the system. */
+const CB_LIGHT = { ...C_FOOTBALL, sport: "basketball",
+  bg: "#FBF4EC", panel: "#FFFFFF", panel2: "#F6E8DA", line: "#EAD5BF",
+  chalk: "#2A1A10", dim: "#5A4636", muted: "#7E6350",
+  lime: "#F2691D", limeDim: "rgba(242,105,29,0.13)", limeDeep: "#B9470E",
+  red: "#E23A50", amber: "#D97E06", sky: "#2D7FF0",
+  pitch: "#B9470E", pitchDim: "rgba(185,71,14,0.10)", pitchDeep: "#5A2808",
+  onAccent: "#140A04", statusBar: "dark-content",
+  heroBg: "#FFFFFF", heroBorder: "#EAD5BF", bannerKicker: "#B9470E", bannerSub: "#5A4636",
+  loaderShadow: "#2A1A10", secIcon: "#F2691D",
+  underBar: "rgba(42,26,16,0.28)", fav: "#B9470E", track: "#D9C7B4", thumb: "#FFFFFF", onDark: false,
+};
+const CB_DARK = { ...C_FOOTBALL, sport: "basketball",
   bg: "#0C0D11", panel: "#15171D", panel2: "#1C1F26", line: "rgba(255,255,255,0.08)",
   chalk: "#F4F1EC", dim: "#B5AFA6", muted: "#8A857D",
   lime: "#FF7A1A", limeDim: "rgba(255,122,26,0.16)", limeDeep: "#FF9A4D",
@@ -48,7 +62,33 @@ const CB = { ...C_FOOTBALL, sport: "basketball",
   onAccent: "#140A04", statusBar: "light-content",
   heroBg: "#111318", heroBorder: "rgba(255,255,255,0.10)", bannerKicker: "#FF9A4D", bannerSub: "#B5AFA6",
   loaderShadow: "#F4F1EC", secIcon: "#FF7A1A",
+  underBar: "rgba(255,255,255,0.28)", fav: "#FF7A1A", track: "#2A2E37", thumb: "#F4F1EC", onDark: true,
 };
+
+/* the brand mark: one ball, football on the left, basketball on the right, a white plus.
+   Fixed colours on every screen so the logo never changes with the sport. */
+function LogoMark({ size = 34 }) {
+  return (
+    <Svg width={size} height={size} viewBox="0 0 48 48" accessibilityLabel="Plus100">
+      <Defs>
+        <ClipPath id="lmL"><Rect x="0" y="0" width="24" height="48" /></ClipPath>
+        <ClipPath id="lmR"><Rect x="24" y="0" width="24" height="48" /></ClipPath>
+      </Defs>
+      <G clipPath="url(#lmL)">
+        <Circle cx="24" cy="24" r="23" fill="#17A54B" />
+        <Polygon points="14,21 20,17 25,22 22,29 15,28" fill="#0B5E2F" />
+        <Path d="M14 21L7 17M20 17l1-8M25 22l7-2M22 29l3 7M15 28l-7 4" stroke="#0B5E2F" strokeWidth="2" fill="none" strokeLinecap="round" />
+      </G>
+      <G clipPath="url(#lmR)">
+        <Circle cx="24" cy="24" r="23" fill="#F2691D" />
+        <Path d="M24 1v46M24 24h23M33 2c-5 8-5 36 0 44" stroke="#5A2808" strokeWidth="2" fill="none" />
+      </G>
+      <Circle cx="24" cy="24" r="23" fill="none" stroke="#FFFFFF" strokeOpacity="0.9" strokeWidth="1.5" />
+      <Path d="M24 13v22M13 24h22" stroke="#140A04" strokeOpacity="0.35" strokeWidth="9" strokeLinecap="round" />
+      <Path d="M24 13v22M13 24h22" stroke="#FFFFFF" strokeWidth="6" strokeLinecap="round" />
+    </Svg>
+  );
+}
 // condensed numerals for the scoreboard; system faces, so nothing to download
 const NUM = { fontFamily: Platform.select({ ios: "Avenir Next Condensed", android: "sans-serif-condensed", default: undefined }), fontWeight: "700" };
 // bright variants for text sitting on stadium photos and green gradients
@@ -170,6 +210,7 @@ function Root() {
   const [bankroll, setBankroll] = useState("");
   const [fplId, setFplId] = useState("");
   const [sport, setSport] = useState("football");
+  const [appearance, setAppearance] = useState("auto");   // basketball: auto | light | dark
   const [ready, setReady] = useState(false);
   const [tab, setTab] = useState("predict");
   const [home, setHome] = useState(null);
@@ -277,6 +318,7 @@ function Root() {
           if (sv.bankroll != null) setBankroll(String(sv.bankroll));
           if (sv.fplId != null) setFplId(String(sv.fplId));
           if (sv.sport === "basketball" || sv.sport === "football") setSport(sv.sport);
+          if (["auto", "light", "dark"].includes(sv.appearance)) setAppearance(sv.appearance);
         } catch { /* corrupt settings: fall back to defaults */ }
       }
         clearTimeout(failsafe);
@@ -290,26 +332,27 @@ function Root() {
   }, []);
 
   const saveSettings = (patch) => {
-    const merged = { server, oddsFormat, bankroll, fplId, sport, ...patch };
+    const merged = { server, oddsFormat, bankroll, fplId, sport, appearance, ...patch };
     AsyncStorage.setItem(SETTINGS_KEY, JSON.stringify(merged)).catch(() => {});
     if (patch.server != null) setServer(patch.server);
     if (patch.oddsFormat != null) setOddsFormat(patch.oddsFormat);
     if (patch.bankroll != null) setBankroll(patch.bankroll);
     if (patch.fplId != null) setFplId(patch.fplId);
     if (patch.sport != null) setSport(patch.sport);
+    if (patch.appearance != null) setAppearance(patch.appearance);
   };
   // Wipe the stored key and return every setting to its default, sport included.
   // Nothing is written back, so a fresh launch starts clean.
   const resetSettings = () => {
     AsyncStorage.removeItem(SETTINGS_KEY).catch(() => {});
     setServer(DEFAULT_SERVER); setOddsFormat("decimal"); setBankroll(""); setFplId("");
-    setSport("football");
+    setSport("football"); setAppearance("auto");
   };
 
   const shared = {
     api, home, away, setHome, setAway, neutral, setNeutral,
     prediction, setPrediction, h2h, setH2h, meta, nbaMeta, nba, patchNba, cache, cacheSet,
-    server, srv, oddsFormat, bankroll, fplId, saveSettings, resetSettings, sport,
+    server, srv, oddsFormat, bankroll, fplId, saveSettings, resetSettings, sport, appearance,
     openDetails: () => setShowDetails(true),
   };
 
@@ -325,8 +368,10 @@ function Root() {
     if (sp === "basketball" && (tab === "parlays" || tab === "fpl")) setTab("predict");
   };
 
-  C = sport === "basketball" ? CB : C_FOOTBALL;     // live theme for every screen below
-  s = sport === "basketball" ? sb : s0;
+  const sysScheme = useColorScheme();
+  const darkCourt = sport === "basketball" && (appearance === "dark" || (appearance === "auto" && sysScheme === "dark"));
+  C = sport === "basketball" ? (darkCourt ? CB_DARK : CB_LIGHT) : C_FOOTBALL;   // live theme for every screen below
+  s = sport === "basketball" ? (darkCourt ? sbDark : sbLight) : s0;
   ODDS_FMT = oddsFormat;
   if (!ready) return <View style={s.root} />;
   return (
@@ -334,7 +379,7 @@ function Root() {
       <StatusBar barStyle={C.statusBar} backgroundColor={C.bg} />
       <View style={s.header}>
         <View style={s.row}>
-          <View style={s.logoMark}><Text style={s.logoPlus}>+</Text></View>
+          <LogoMark size={34} />
           <Text style={[s.wordmark, { marginLeft: 10 }]}>Plus100</Text>
         </View>
         <View style={s.sportSw} accessibilityRole="tablist">
@@ -1510,7 +1555,7 @@ function NbaTeamLine({ p, side, team, color, tag }) {
           <Text style={[TNUM, { color: C.dim, letterSpacing: 0 }]}>  · Elo {t.elo}</Text></Text>
       </View>
       <View style={{ alignItems: "flex-end" }}>
-        <Text style={[s.sbPts, NUM, TNUM, fav && { color: C.lime }]}>{p.projected[side].toFixed(0)}</Text>
+        <Text style={[s.sbPts, NUM, TNUM, fav && { color: C.fav }]}>{p.projected[side].toFixed(0)}</Text>
         <View style={{ flexDirection: "row", alignItems: "baseline", gap: 6 }}>
           <CountUp value={p.win_prob[side] * 100} decimals={1} suffix="%" style={[s.sbPct, NUM, { color }]} />
           <Text style={[s.sbFair, TNUM]}>fair {fmtOdds(p.win_prob.fair_odds[side])}</Text>
@@ -1523,7 +1568,7 @@ function NbaTeamLine({ p, side, team, color, tag }) {
 function NbaCell({ value, label, on, last }) {
   return (
     <View style={[s.sbCell, last && { borderRightWidth: 0 }]}>
-      <Text style={[s.sbCellVal, NUM, TNUM, on && { color: C.lime }]}>{value}</Text>
+      <Text style={[s.sbCellVal, NUM, TNUM, on && { color: C.fav }]}>{value}</Text>
       <Text style={s.sbCellLbl}>{label}</Text>
     </View>
   );
@@ -1663,6 +1708,7 @@ function NbaPropsCard({ api, nba, patchNba, kitH, kitA, bankroll }) {
 }
 
 function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankroll }) {
+  const [showMath, setShowMath] = useState(false);
   const { home, away, neutral, date, prediction: p } = nba;
   const [active, setActive] = useState(null);
   const [q, setQ] = useState("");
@@ -1710,9 +1756,9 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
   };
   const opts = teamList.filter((t) => q.trim().length >= 1
     && (t.name.toLowerCase().includes(q.toLowerCase()) || (t.abbr || "").toLowerCase() === q.toLowerCase())).slice(0, 6);
-  const kitH = kitColor(home?.color, true) || C.chalk;
-  let kitA = kitColor(away?.color, true) || C.sky;
-  if (colorDist(kitH, kitA) < 95) kitA = kitColor(away?.alt, true) || C.sky;
+  const kitH = kitColor(home?.color, C.onDark) || C.chalk;
+  let kitA = kitColor(away?.color, C.onDark) || C.sky;
+  if (colorDist(kitH, kitA) < 95) kitA = kitColor(away?.alt, C.onDark) || C.sky;
   const sgn = (v) => `${v > 0 ? "+" : ""}${v || 0}`;
   const nSeasons = nbaMeta?.fit?.seasons?.length;
   const nGames = nbaMeta?.fit?.games ?? nbaMeta?.games;
@@ -1769,7 +1815,7 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
       </PressScale>
       <View style={[s.row, { marginTop: 14, justifyContent: "center" }]}>
         <Switch value={neutral} onValueChange={(v) => patchNba({ neutral: v })}
-          trackColor={{ true: C.lime, false: C.panel2 }} thumbColor={C.chalk} />
+          trackColor={{ true: C.lime, false: C.track }} thumbColor={C.thumb} />
         <Text style={s.dimTxt}>  neutral court</Text>
       </View>
       {!!err && <Text style={s.errTxt}>{err}. If this keeps happening, check the server address in Settings.</Text>}
@@ -1782,7 +1828,7 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
         const mrows = [[`${p.home.name} by 11+`, mg.home_by_11_plus, kitH], [`${p.home.name} by 6-10`, mg.home_by_6_10, kitH], [`${p.home.name} by 1-5`, mg.home_by_1_5, kitH],
           [`${p.away.name} by 1-5`, mg.away_by_1_5, kitA], [`${p.away.name} by 6-10`, mg.away_by_6_10, kitA], [`${p.away.name} by 11+`, mg.away_by_11_plus, kitA]];
         const mmax = Math.max(...mrows.map((r) => r[1]), 0.01);
-        const under = "rgba(255,255,255,0.28)";
+        const under = C.underBar;
         const ab = (key) => ((key === "home" ? home : away)?.abbr) || p[key].name.toUpperCase();
         const favKey = pr.margin >= 0 ? "home" : "away";
         const spreadTxt = Math.abs(pr.margin) < 0.05 ? "PICK 'EM" : `${ab(favKey)} -${Math.abs(pr.margin).toFixed(1)}`;
@@ -1810,6 +1856,12 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
                 <NbaCell value={sgn(inp.injury_adjust)} label="injury edge, pts" on={!!inp.injury_adjust} last />
               </View>
               <Text style={s.sbNote}>{p.margin_note}</Text>
+              <Pressable style={({ pressed }) => [s.detailsBtn, pressed && { opacity: 0.8 }]} onPress={() => setShowMath(true)}
+                accessibilityRole="button">
+                <Feather name="divide" size={15} color={C.lime} />
+                <Text style={s.detailsBtnTxt}>  The math, with this game's numbers</Text>
+              </Pressable>
+              <NbaDetailsModal visible={showMath} onClose={() => setShowMath(false)} p={p} nbaMeta={nbaMeta} />
             </Card>
             <Card delay={70}>
               <SectionTitle icon="grid" note="how far apart they finish">Winning margin</SectionTitle>
@@ -1854,10 +1906,6 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
                 <EloLineChart histHome={p.elo_history.home} histAway={p.elo_history.away} nameHome={p.home.name} nameAway={p.away.name} />
               </Card>
             )}
-            <Card delay={250}>
-              <SectionTitle icon="divide">The math, with this game's numbers</SectionTitle>
-              <Text style={s.dimTxt}>Rating gap {inp.elo_gap > 0 ? "+" : ""}{inp.elo_gap}{slope ? ` (one point of margin per ${Math.round(inp.rating_pts)} rating points) is worth ${(inp.elo_gap * inp.points_per_elo).toFixed(1)} points` : ""}, plus home court {inp.home_court_pts}{inp.rest_adjust ? `, rest ${inp.rest_adjust}` : ""}{inp.injury_adjust ? `, injuries ${inp.injury_adjust}` : ""}: projected margin {pr.margin > 0 ? "+" : ""}{pr.margin}. Actual margins scatter around that by about {inp.sd_margin} points, so the share of the curve above zero is the win chance, and every spread line is the same curve cut elsewhere. The total comes from each side's recent scoring against the other's recent defending.</Text>
-            </Card>
             {(p.caveats || []).map((c, i) => (
               <View key={i} style={s.caveatRow}><Feather name="alert-triangle" size={13} color={C.amber} /><Text style={s.caveat}> {c}</Text></View>
             ))}
@@ -2307,7 +2355,7 @@ function InfoRow({ label, value }) {
   );
 }
 
-function SettingsScreen({ server, srv, oddsFormat, bankroll, fplId, saveSettings, resetSettings, meta, nbaMeta }) {
+function SettingsScreen({ server, srv, oddsFormat, bankroll, fplId, saveSettings, resetSettings, meta, nbaMeta, appearance }) {
   const [showAbout, setShowAbout] = useState(false);
   const [fplDraft, setFplDraft] = useState(fplId);
   const [serverDraft, setServerDraft] = useState(server);
@@ -2324,6 +2372,13 @@ function SettingsScreen({ server, srv, oddsFormat, bankroll, fplId, saveSettings
         <Text style={s.dimTxt}>How prices are written throughout the app.</Text>
         <Seg options={[["decimal", "Decimal (2.50)"], ["american", "American (+150)"]]}
           value={oddsFormat} onPick={(v) => saveSettings({ oddsFormat: v })} />
+      </Card>
+
+      <Card>
+        <SectionTitle icon="sun">Basketball appearance</SectionTitle>
+        <Text style={s.dimTxt}>The light court or the dark arena. Auto follows your phone. Football keeps its one daylight look.</Text>
+        <Seg options={[["auto", "Auto"], ["light", "Light"], ["dark", "Dark"]]}
+          value={appearance} onPick={(v) => saveSettings({ appearance: v })} />
       </Card>
 
       <Card>
@@ -2521,6 +2576,79 @@ function AboutScreen({ meta, nbaMeta }) {
 /* ================= the math (details modal) ================= */
 
 function Para({ children }) { return <Text style={s.aboutTxt}>{children}</Text>; }
+
+/* basketball: how the scoreboard numbers are built, with this game's real values */
+function NbaDetailsModal({ visible, onClose, p, nbaMeta }) {
+  const insets = useSafeAreaInsets();
+  if (!p) return null;
+  const inp = p.inputs, pr = p.projected, w = p.win_prob, ev = nbaMeta?.eval, fit = nbaMeta?.fit;
+  const ppe = inp.points_per_elo || fit?.points_per_elo;
+  const perPoint = ppe ? Math.round(1 / ppe) : null;
+  const edge = inp.rating_pts ?? (ppe ? inp.elo_gap * ppe : null);
+  const seasons = inp.seasons || fit?.seasons?.length;
+  const span = nbaMeta?.data_from && nbaMeta?.data_to ? ` (${nbaMeta.data_from} to ${nbaMeta.data_to})` : "";
+  const sgn = (v) => `${v > 0 ? "+" : ""}${v}`;
+  return (
+    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+      <View style={[s.root, { paddingTop: Math.max(insets.top, 24) + 6, paddingBottom: insets.bottom }]}>
+        <View style={s.rowBetween}>
+          <Text style={[s.h2, { padding: 20, marginBottom: 0, flex: 1 }]}>How we got these numbers</Text>
+          <Pressable onPress={onClose} style={{ padding: 20 }} accessibilityLabel="Close">
+            <Feather name="x" size={24} color={C.chalk} />
+          </Pressable>
+        </View>
+        <ScrollView contentContainerStyle={s.scroll}>
+          <Text style={s.dimTxt}>{p.home.name} v {p.away.name}, in plain words with this game's real values.</Text>
+
+          <SectionTitle accent icon="trending-up">Step 1 · Rating gap</SectionTitle>
+          <Para>
+            Every team carries an Elo rating that moves after each game by how unexpected the result was and by how
+            big the margin was. {p.home.name} <Key>{p.home.elo}</Key> against {p.away.name} <Key>{p.away.elo}</Key>
+            {p.neutral_venue ? "" : ", plus home court,"} is a gap of <Key>{sgn(inp.elo_gap)} rating points</Key>.
+          </Para>
+
+          <SectionTitle accent icon="hash">Step 2 · Points from ratings</SectionTitle>
+          <Para>
+            {seasons ? `On ${seasons} seasons of results${span}, ` : "On the stored results, "}
+            {perPoint ? <Text>about <Key>{perPoint} rating points</Key> are worth one point of margin</Text>
+              : "the rating gap is turned into points with a slope fitted on those games"}
+            {edge != null ? <Text>, so that gap is a <Key>{Number(edge).toFixed(1)}-point</Key> edge before anything else</Text> : null}.
+            Home court adds <Key>{inp.home_court_pts}</Key> points
+            {inp.rest_adjust ? `, rest adds ${inp.rest_adjust}` : ""}{inp.injury_adjust ? `, listed injuries add ${inp.injury_adjust}` : ""}:
+            projected margin <Key>{sgn(pr.margin)}</Key>.
+          </Para>
+
+          <SectionTitle accent icon="activity">Step 3 · From a margin to a probability</SectionTitle>
+          <Para>
+            Actual margins scatter around the projection with a spread of about <Key>{inp.sd_margin} points</Key>, measured on
+            the stored games, not assumed. The share of that bell curve above zero is the win probability:
+            {" "}<Key>{(w.home * 100).toFixed(1)}%</Key> for {p.home.name}. Every spread line is the same curve cut at a different point.
+          </Para>
+
+          <SectionTitle accent icon="list">Step 4 · The total</SectionTitle>
+          <Para>
+            Each side's recent scoring, weighted toward the last few weeks, against the other side's recent defending gives a
+            projected total of <Key>{pr.total.toFixed(1)}</Key>; totals scatter with a spread of about {inp.sd_total} points, which
+            prices every over/under line.{inp.half_share ? ` First halves carry about ${Math.round(inp.half_share * 100)}% of the points, which sets the half-time numbers.` : ""}
+          </Para>
+
+          <SectionTitle accent icon="check-circle">Step 5 · How good is this?</SectionTitle>
+          <Para>
+            {ev ? `Replayed on the ${ev.season} season without peeking (${ev.games.toLocaleString()} games), the model picked the winner ${(ev.accuracy * 100).toFixed(1)}% of the time and missed the spread by ${ev.spread_mae} points on average (Brier ${ev.brier}). `
+                : "The model is re-tested on the most recent complete season every time new results arrive. "}
+            The books are at least as sharp, which is why the Vs Market tab blends their number with ours instead of trusting either alone.
+          </Para>
+          {(p.caveats || []).map((c, i) => (
+            <View key={i} style={s.caveatRow}>
+              <Feather name="alert-triangle" size={13} color={C.amber} />
+              <Text style={s.caveat}> {c}</Text>
+            </View>
+          ))}
+        </ScrollView>
+      </View>
+    </Modal>
+  );
+}
 function Key({ children }) { return <Text style={{ color: C.lime, fontWeight: "700" }}>{children}</Text>; }
 
 function DetailsModal({ visible, onClose, prediction, meta }) {
@@ -2665,9 +2793,6 @@ const makeStyles = (C) => { const nba = C.sport === "basketball"; const rad = (n
   sportBtnOn: { backgroundColor: C.panel, shadowColor: "#000", shadowOpacity: 0.08, shadowRadius: 4, elevation: 1 },
   sportTxt: { fontSize: 12.5, fontWeight: "600", color: C.dim },
   sportTxtOn: { color: nba ? C.limeDeep : C.lime, fontWeight: "800" },
-  logoMark: { width: 34, height: 34, borderRadius: 10, backgroundColor: C.lime,
-    alignItems: "center", justifyContent: "center" },
-  logoPlus: { color: C.onAccent, fontSize: 24, fontWeight: "800", marginTop: -2 },
   wordmark: { color: C.chalk, fontSize: 22, fontWeight: "800", letterSpacing: -0.4 },
   srvBanner: { flexDirection: "row", alignItems: "center", gap: 10, marginHorizontal: 20,
     marginBottom: 8, paddingHorizontal: 14, paddingVertical: 10, borderRadius: 12,
@@ -2929,5 +3054,6 @@ const makeStyles = (C) => { const nba = C.sport === "basketball"; const rad = (n
     shadowOffset: { width: 0, height: 0 }, elevation: 6 },
 }); };
 const s0 = makeStyles(C_FOOTBALL);
-const sb = makeStyles(CB);   // basketball screens
+const sbLight = makeStyles(CB_LIGHT);   // basketball, light court
+const sbDark = makeStyles(CB_DARK);     // basketball, dark arena
 let s = s0;
