@@ -1674,9 +1674,9 @@ function NbaPredictScreen({ api, meta }) {
                   <CountUp value={w.home * 100} decimals={1} suffix="%" style={[s.heroPct, { color: kitH }]} />
                   <Text style={s.heroFair}>fair {fmtOdds(w.fair_odds.home)}</Text>
                 </View>
-                <View style={{ alignItems: "center", paddingTop: 26, width: 118 }}>
+                <View style={{ alignItems: "center", paddingTop: 26, width: 132 }}>
                   <Text style={s.heroDrawLbl}>PROJECTED</Text>
-                  <Text style={[s.heroDraw, TNUM, { fontSize: 30 }]}>{pr.home.toFixed(0)}–{pr.away.toFixed(0)}</Text>
+                  <Text style={[s.heroDraw, TNUM, { fontSize: 26, letterSpacing: -1 }]} numberOfLines={1} adjustsFontSizeToFit>{pr.home.toFixed(0)}–{pr.away.toFixed(0)}</Text>
                   <Text style={[s.heroFair, { textAlign: "center" }]}>{pr.spread}{"\n"}total {pr.total.toFixed(1)}</Text>
                 </View>
                 <View style={{ flex: 1, alignItems: "center" }}>
