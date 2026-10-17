@@ -822,7 +822,7 @@ function renderNba(out, p) {
       </div>
       <div class="stack"><div style="width:${w.home*100}%;background:${kh}"></div><div style="width:${w.away*100}%;background:${ka}"></div></div>
       <div class="tiles">
-        <div class="tile"><b style="color:#5CE690">${inp.home_court_pts > 0 ? "+" + inp.home_court_pts : "0"}</b><span>home court, in points</span></div>
+        <div class="tile"><b style="color:#FFB36B">${inp.home_court_pts > 0 ? "+" + inp.home_court_pts : "0"}</b><span>home court, in points</span></div>
         <div class="tile"><b style="color:${inp.rest_adjust ? "#FFD27A" : "#fff"}">${inp.rest_adjust > 0 ? "+" : ""}${inp.rest_adjust || 0}</b><span>rest edge</span></div>
         <div class="tile"><b style="color:${inp.injury_adjust ? "#FFD27A" : "#fff"}">${inp.injury_adjust > 0 ? "+" : ""}${inp.injury_adjust || 0}</b><span>injury edge</span></div>
       </div>

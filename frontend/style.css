@@ -275,3 +275,29 @@ h3.sec svg { width: 16px; height: 16px; stroke: var(--muted); flex-shrink: 0; }
 .inj .st { color: var(--muted); white-space: nowrap; }
 .inj .st.out { color: var(--red); font-weight: 700; }
 .nbalogo { width: 60px; height: 60px; object-fit: contain; margin-bottom: 8px; }
+
+/* ---------- basketball mode: hardwood and orange instead of grass green ---------- */
+.sport-nba {
+  --bg: #FBF4EC; --panel: #FFFFFF; --panel2: #F6E8DA; --line: #EAD5BF;
+  --ink: #2A1A10; --dim: #5A4636; --muted: #9A7B66;
+  --green: #F2691D; --green-deep: #B9470E; --green-dim: rgba(242,105,29,.13);
+  --pitch: #8A4A1E; --shadow: 0 1px 2px rgba(60,30,10,.06), 0 8px 24px rgba(60,30,10,.08);
+}
+.sport-nba .btn { background: linear-gradient(135deg, #F47B2A, #B9470E); }
+.sport-nba .btn:hover { box-shadow: 0 6px 18px rgba(185,71,14,.35); }
+.sport-nba .hero { background: linear-gradient(135deg, #2B1708 0%, #140A04 100%); }
+.sport-nba .hero .tile { background: rgba(255,255,255,.10); }
+.sport-nba .sportsw button.on { color: #B9470E; }
+.sport-nba .nav button.on { background: rgba(242,105,29,.13); color: #B9470E; }
+.sport-nba .switch input:checked + .track { background: #F2691D; }
+.sport-nba .stack { background: rgba(255,255,255,.14); }
+.sport-nba .fx .lg { color: #B9470E; }
+.sport-nba .edgechip { background: rgba(242,105,29,.15); color: #B9470E; }
+/* the loader becomes a basketball: hide the football path, draw an orange ball with seams */
+.sport-nba .ball svg { visibility: hidden; }
+.sport-nba .ball { position: relative; width: 34px; height: 34px; border-radius: 50%;
+  background: radial-gradient(circle at 36% 32%, #FFA45C 0%, #EE6A1A 45%, #B9470E 100%); }
+.sport-nba .ball::before, .sport-nba .ball::after { content: ""; position: absolute; inset: 0; border-radius: 50%; }
+.sport-nba .ball::before { background: linear-gradient(#5A2808, #5A2808) center/100% 2px no-repeat,
+  linear-gradient(#5A2808, #5A2808) center/2px 100% no-repeat; }
+.sport-nba .ball::after { border: 2px solid #5A2808; border-color: transparent #5A2808; transform: scaleX(.55); }

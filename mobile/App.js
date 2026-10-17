@@ -31,6 +31,13 @@ const C = {
   pitch: "#0C8A3E", pitchDim: "rgba(12,138,62,0.10)", pitchDeep: "#0A5B33",
   onAccent: "#FFFFFF", statusBar: "dark-content",
 };
+// basketball wears hardwood and orange instead of grass green
+const CB = { ...C,
+  bg: "#FBF4EC", panel2: "#F6E8DA", line: "#EAD5BF",
+  chalk: "#2A1A10", dim: "#5A4636", muted: "#9A7B66",
+  lime: "#F2691D", limeDim: "rgba(242,105,29,0.13)", limeDeep: "#B9470E",
+  pitch: "#8A4A1E", pitchDim: "rgba(138,74,30,0.10)", pitchDeep: "#5A2808",
+};
 // bright variants for text sitting on stadium photos and green gradients
 const HERO = { home: "#5CE690", away: "#8FC1FF", draw: "#D8E4DA",
                txt: "#FFFFFF", dim: "rgba(255,255,255,0.78)", amber: "#FFD27A" };
@@ -277,8 +284,8 @@ function Root() {
 
   if (!ready) return <View style={s.root} />;
   return (
-    <View style={[s.root, { paddingTop: insets.top + 6, paddingBottom: insets.bottom }]}>
-      <StatusBar barStyle={C.statusBar} backgroundColor={C.bg} />
+    <View style={[s.root, sport === "basketball" && { backgroundColor: CB.bg }, { paddingTop: insets.top + 6, paddingBottom: insets.bottom }]}>
+      <StatusBar barStyle={C.statusBar} backgroundColor={sport === "basketball" ? CB.bg : C.bg} />
       <View style={s.header}>
         <View style={s.row}>
           <View style={s.logoMark}><Text style={s.logoPlus}>+</Text></View>
@@ -288,7 +295,7 @@ function Root() {
           {[["football", "Football"], ["basketball", "Basketball"]].map(([k, label]) => (
             <Pressable key={k} onPress={() => switchSport(k)} accessibilityRole="tab"
               style={[s.sportBtn, sport === k && s.sportBtnOn]}>
-              <Text style={[s.sportTxt, sport === k && s.sportTxtOn]}>{label}</Text>
+              <Text style={[s.sportTxt, sport === k && s.sportTxtOn, sport === k && k === "basketball" && { color: CB.limeDeep }]}>{label}</Text>
             </Pressable>
           ))}
         </View>
@@ -316,12 +323,12 @@ function Root() {
         {tab === "settings" && <SettingsScreen {...shared} />}
       </TabFade>
 
-      <View style={s.nav}>
+      <View style={[s.nav, sport === "basketball" && { backgroundColor: CB.panel, borderTopColor: CB.line }]}>
         {TABS.map(([k, icon, label]) => (
-          <Pressable key={k} style={[s.navBtn, tab === k && s.navBtnOn]} onPress={() => setTab(k)}
+          <Pressable key={k} style={[s.navBtn, tab === k && (sport === "basketball" ? sb.navBtnOn : s.navBtnOn)]} onPress={() => setTab(k)}
             accessibilityRole="tab" accessibilityLabel={label}>
-            <Feather name={icon} size={19} color={tab === k ? C.lime : C.muted} />
-            <Text style={[s.navTxt, tab === k && { color: C.lime, fontWeight: "700" }]}>{label}</Text>
+            <Feather name={icon} size={19} color={tab === k ? (sport === "basketball" ? CB.lime : C.lime) : C.muted} />
+            <Text style={[s.navTxt, tab === k && { color: sport === "basketball" ? CB.lime : C.lime, fontWeight: "700" }]}>{label}</Text>
           </Pressable>
         ))}
       </View>
@@ -1524,11 +1531,11 @@ function NbaFixturesRow({ api, onLoad }) {
           const d = new Date(f.kickoff);
           const when = `${String(d.getDate()).padStart(2, "0")}/${String(d.getMonth() + 1).padStart(2, "0")} · ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
           return (
-            <PressScale key={i} style={s.mqCard} onPress={() => onLoad(f.home, f.away)}>
-              <Text style={s.mqTag} numberOfLines={1}>{f.league}</Text>
-              <Text style={[s.optName, { marginTop: 6, fontSize: 13.5 }]} numberOfLines={1}>{f.away}</Text>
-              <Text style={[s.optName, { fontSize: 13.5 }]} numberOfLines={1}>@ {f.home}</Text>
-              <Text style={[s.mqNames, TNUM]} numberOfLines={1}>{when}{f.book_line ? ` · ${f.book_line}` : ""}{f.book_total ? ` · O/U ${f.book_total}` : ""}</Text>
+            <PressScale key={i} style={sb.mqCard} onPress={() => onLoad(f.home, f.away)}>
+              <Text style={sb.mqTag} numberOfLines={1}>{f.league}</Text>
+              <Text style={[sb.optName, { marginTop: 6, fontSize: 13.5 }]} numberOfLines={1}>{f.away}</Text>
+              <Text style={[sb.optName, { fontSize: 13.5 }]} numberOfLines={1}>@ {f.home}</Text>
+              <Text style={[sb.mqNames, TNUM]} numberOfLines={1}>{when}{f.book_line ? ` · ${f.book_line}` : ""}{f.book_total ? ` · O/U ${f.book_total}` : ""}</Text>
             </PressScale>
           );
         })}
@@ -1569,79 +1576,79 @@ function NbaPredictScreen({ api, meta }) {
   const loadPair = (hn, an) => { const h = byName[hn], a = byName[an]; if (!h || !a) return; setHome(h); setAway(a); setNeutral(false); run(h, a, false); };
   const swap = () => { if (!home || !away) return; springy(); const h = home; setHome(away); setAway(h); if (p) run(away, h, neutral); };
   const opts = (teams || []).filter((t) => q.trim().length >= 1 && (t.name.toLowerCase().includes(q.toLowerCase()) || (t.abbr || "").toLowerCase() === q.toLowerCase())).slice(0, 6);
-  const kitH = kitColor(home?.color, true) || C.lime;
+  const kitH = kitColor(home?.color, true) || CB.lime;
   let kitA = kitColor(away?.color, true) || C.sky;
   if (colorDist(kitH, kitA) < 95) kitA = kitColor(away?.alt, true) || C.sky;
 
   const Slot = ({ slot, team }) => (
-    <PressScale style={[s.slotCard, active === slot && s.slotCardOn]} containerStyle={{ flex: 1 }}
+    <PressScale style={[sb.slotCard, active === slot && sb.slotCardOn]} containerStyle={{ flex: 1 }}
       onPress={() => { springy(); setActive(active === slot ? null : slot); }}>
-      <View style={s.slotSideTag}><Text style={s.slotSideTxt}>{slot === "home" ? "HOME" : "AWAY"}</Text></View>
-      {team?.logo ? <Image source={{ uri: team.logo }} style={s.slotBadge} /> : <View style={[s.slotBadge, { backgroundColor: C.panel2, alignItems: "center", justifyContent: "center" }]}><Feather name="plus" size={20} color={C.muted} /></View>}
-      <Text style={s.slotName} numberOfLines={1}>{team ? team.name : `Pick ${slot}`}</Text>
-      <Text style={[s.slotSub, TNUM]}>{team ? `NBA · Elo ${team.elo}` : "tap to search"}</Text>
+      <View style={sb.slotSideTag}><Text style={sb.slotSideTxt}>{slot === "home" ? "HOME" : "AWAY"}</Text></View>
+      {team?.logo ? <Image source={{ uri: team.logo }} style={sb.slotBadge} /> : <View style={[sb.slotBadge, { backgroundColor: CB.panel2, alignItems: "center", justifyContent: "center" }]}><Feather name="plus" size={20} color={CB.muted} /></View>}
+      <Text style={sb.slotName} numberOfLines={1}>{team ? team.name : `Pick ${slot}`}</Text>
+      <Text style={[sb.slotSub, TNUM]}>{team ? `NBA · Elo ${team.elo}` : "tap to search"}</Text>
     </PressScale>
   );
 
   const Row = ({ label, prob, color, max = 1, pctDigits = 0 }) => (
-    <View style={s.mktRow}>
-      <Text style={s.mktLabel} numberOfLines={1}>{label}</Text>
+    <View style={sb.mktRow}>
+      <Text style={sb.mktLabel} numberOfLines={1}>{label}</Text>
       <View style={{ flex: 1, marginHorizontal: 10 }}><HBar frac={prob / max} color={color} height={6} /></View>
-      <Text style={[s.mktVal, TNUM]}>{(prob * 100).toFixed(pctDigits)}%</Text>
+      <Text style={[sb.mktVal, TNUM]}>{(prob * 100).toFixed(pctDigits)}%</Text>
     </View>
   );
 
   return (
-    <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
+    <ScrollView contentContainerStyle={sb.scroll} keyboardShouldPersistTaps="handled">
       {!p && !busy && (
-        <View style={s.banner}>
-          <GradientBG id="welcome-nba" from="#1CB258" to="#0B7A38" rounded={20} style={{ left: -18, right: -18, top: -18, bottom: -18 }} />
+        <View style={sb.banner}>
+          <GradientBG id="welcome-nba" from="#F47B2A" to="#B9470E" rounded={20} style={{ left: -18, right: -18, top: -18, bottom: -18 }} />
           <View style={{ flex: 1, paddingRight: 10 }}>
-            <Text style={s.bannerKicker}>NBA</Text>
-            <Text style={s.bannerTitle}>Call any NBA game</Text>
-            <Text style={s.bannerSub}>Win probability, projected score, spread and total from five seasons of results, tonight's injury report and each side's rest.</Text>
+            <Text style={sb.bannerKicker}>NBA</Text>
+            <Text style={sb.bannerTitle}>Call any NBA game</Text>
+            <Text style={sb.bannerSub}>Win probability, projected score, spread and total from five seasons of results, tonight's injury report and each side's rest.</Text>
           </View>
           <View style={{ zIndex: 2 }}><Feather name="dribbble" size={64} color="rgba(255,255,255,0.9)" /></View>
         </View>
       )}
-      <View style={s.slotRow}>
+      <View style={sb.slotRow}>
         <Slot slot="home" team={home} />
-        <View style={s.vsWrap}>
-          <Text style={s.vsTxt}>VS</Text>
+        <View style={sb.vsWrap}>
+          <Text style={sb.vsTxt}>VS</Text>
           <Pressable disabled={!home || !away} onPress={swap} hitSlop={10} accessibilityLabel="Switch home and away"
-            style={[s.swapBtn, (!home || !away) && { opacity: 0.35 }]}><Feather name="repeat" size={15} color={C.dim} /></Pressable>
+            style={[sb.swapBtn, (!home || !away) && { opacity: 0.35 }]}><Feather name="repeat" size={15} color={CB.dim} /></Pressable>
         </View>
         <Slot slot="away" team={away} />
       </View>
       {active && (
         <View style={{ marginTop: 10 }}>
-          <TextInput style={s.input} value={q} onChangeText={setQ} autoFocus placeholder={`Search the ${active} team…`}
-            placeholderTextColor={C.muted} autoCorrect={false} />
+          <TextInput style={sb.input} value={q} onChangeText={setQ} autoFocus placeholder={`Search the ${active} team…`}
+            placeholderTextColor={CB.muted} autoCorrect={false} />
           {opts.length > 0 && (
-            <View style={s.dropdown}>
+            <View style={sb.dropdown}>
               {opts.map((t) => (
-                <Pressable key={t.id} style={({ pressed }) => [s.opt, pressed && { backgroundColor: C.panel2 }]} onPress={() => pick(active, t)}>
-                  <View style={[s.row, { gap: 10 }]}>
+                <Pressable key={t.id} style={({ pressed }) => [sb.opt, pressed && { backgroundColor: CB.panel2 }]} onPress={() => pick(active, t)}>
+                  <View style={[sb.row, { gap: 10 }]}>
                     {t.logo ? <Image source={{ uri: t.logo }} style={{ width: 26, height: 26 }} /> : null}
-                    <View><Text style={s.optName}>{t.name}</Text><Text style={[s.optSub, TNUM]}>NBA · elo {t.elo}</Text></View>
+                    <View><Text style={sb.optName}>{t.name}</Text><Text style={[sb.optSub, TNUM]}>NBA · elo {t.elo}</Text></View>
                   </View>
                 </Pressable>
               ))}
             </View>
           )}
-          {teams && q.trim().length >= 2 && opts.length === 0 && <Text style={[s.axisNote, { marginTop: 8 }]}>No team matches "{q}".</Text>}
+          {teams && q.trim().length >= 2 && opts.length === 0 && <Text style={[sb.axisNote, { marginTop: 8 }]}>No team matches "{q}".</Text>}
         </View>
       )}
-      <PressScale disabled={!home || !away || busy} onPress={() => run()} style={[s.cta, (!home || !away || busy) && s.btnOff]}>
-        <GradientBG id="cta-nba" from="#1FB25A" to="#0B7A38" rounded={16} />
+      <PressScale disabled={!home || !away || busy} onPress={() => run()} style={[sb.cta, (!home || !away || busy) && sb.btnOff]}>
+        <GradientBG id="cta-nba" from="#F47B2A" to="#B9470E" rounded={16} />
         <Feather name="zap" size={17} color={C.onAccent} />
-        <Text style={s.ctaTxt}>{busy ? "Computing…" : "Predict this game"}</Text>
+        <Text style={sb.ctaTxt}>{busy ? "Computing…" : "Predict this game"}</Text>
       </PressScale>
-      <View style={[s.row, { marginTop: 14, justifyContent: "center" }]}>
-        <Switch value={neutral} onValueChange={setNeutral} trackColor={{ true: C.lime, false: C.line }} thumbColor="#FFFFFF" />
-        <Text style={s.dimTxt}>  neutral court</Text>
+      <View style={[sb.row, { marginTop: 14, justifyContent: "center" }]}>
+        <Switch value={neutral} onValueChange={setNeutral} trackColor={{ true: CB.lime, false: CB.line }} thumbColor="#FFFFFF" />
+        <Text style={sb.dimTxt}>  neutral court</Text>
       </View>
-      {!!err && <Text style={s.errTxt}>{err}. If this keeps happening, check the server address in Settings.</Text>}
+      {!!err && <Text style={sb.errTxt}>{err}. If this keeps happening, check the server address in Settings.</Text>}
       {busy && <BallLoader label="Replaying five seasons of NBA results…" />}
       {!p && !busy && <NbaFixturesRow api={api} onLoad={loadPair} />}
 
@@ -1653,43 +1660,43 @@ function NbaPredictScreen({ api, meta }) {
         const rest = (t) => t.rest_days <= 1 ? "second night of a back-to-back" : `${t.rest_days} days' rest`;
         const Inj = ({ t, color }) => (
           <View style={{ marginTop: 8 }}>
-            <Text style={[s.smallLabel, { color }]}>{t.name} · {rest(t)}</Text>
-            {t.injuries.length === 0 ? <Text style={s.axisNote}>No one on the injury report.</Text>
+            <Text style={[sb.smallLabel, { color }]}>{t.name} · {rest(t)}</Text>
+            {t.injuries.length === 0 ? <Text style={sb.axisNote}>No one on the injury report.</Text>
               : t.injuries.map((i, k) => (
-                <View key={k} style={s.rowBetween}>
-                  <Text style={s.dimTxt} numberOfLines={1}>{i.player}{i.ppg ? ` · ${i.ppg} ppg` : ""}</Text>
-                  <Text style={[s.smallLabel, /out/i.test(i.status) && { color: C.red, fontWeight: "700" }]}>{i.status}{i.detail ? ` · ${i.detail}` : ""}</Text>
+                <View key={k} style={sb.rowBetween}>
+                  <Text style={sb.dimTxt} numberOfLines={1}>{i.player}{i.ppg ? ` · ${i.ppg} ppg` : ""}</Text>
+                  <Text style={[sb.smallLabel, /out/i.test(i.status) && { color: C.red, fontWeight: "700" }]}>{i.status}{i.detail ? ` · ${i.detail}` : ""}</Text>
                 </View>))}
           </View>
         );
         return (
           <>
-            <Card delay={0} style={s.heroCard}>
-              <GradientBG id="hero-nba" from="#0B1F12" to="#16251A" rounded={22} style={{ left: -20, right: -20, top: -20, bottom: -20 }} />
-              <View style={[s.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
+            <Card delay={0} style={sb.heroCard}>
+              <GradientBG id="hero-nba" from="#2B1708" to="#140A04" rounded={22} style={{ left: -20, right: -20, top: -20, bottom: -20 }} />
+              <View style={[sb.row, { justifyContent: "space-between", alignItems: "flex-start" }]}>
                 <View style={{ flex: 1, alignItems: "center" }}>
                   {home?.logo ? <Image source={{ uri: home.logo }} style={{ width: 54, height: 54 }} /> : null}
-                  <Text style={[s.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.home.name}</Text>
-                  <View style={s.heroSideTag}><Text style={s.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "HOME"}</Text></View>
-                  <CountUp value={w.home * 100} decimals={1} suffix="%" style={[s.heroPct, { color: kitH }]} />
-                  <Text style={s.heroFair}>fair {fmtOdds(w.fair_odds.home)}</Text>
+                  <Text style={[sb.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.home.name}</Text>
+                  <View style={sb.heroSideTag}><Text style={sb.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "HOME"}</Text></View>
+                  <CountUp value={w.home * 100} decimals={1} suffix="%" style={[sb.heroPct, { color: kitH }]} />
+                  <Text style={sb.heroFair}>fair {fmtOdds(w.fair_odds.home)}</Text>
                 </View>
                 <View style={{ alignItems: "center", paddingTop: 26, width: 132 }}>
-                  <Text style={s.heroDrawLbl}>PROJECTED</Text>
-                  <Text style={[s.heroDraw, TNUM, { fontSize: 26, letterSpacing: -1 }]} numberOfLines={1} adjustsFontSizeToFit>{pr.home.toFixed(0)}–{pr.away.toFixed(0)}</Text>
-                  <Text style={[s.heroFair, { textAlign: "center" }]}>{pr.spread}{"\n"}total {pr.total.toFixed(1)}</Text>
+                  <Text style={sb.heroDrawLbl}>PROJECTED</Text>
+                  <Text style={[sb.heroDraw, TNUM, { fontSize: 26, letterSpacing: -1 }]} numberOfLines={1} adjustsFontSizeToFit>{pr.home.toFixed(0)}–{pr.away.toFixed(0)}</Text>
+                  <Text style={[sb.heroFair, { textAlign: "center" }]}>{pr.spread}{"\n"}total {pr.total.toFixed(1)}</Text>
                 </View>
                 <View style={{ flex: 1, alignItems: "center" }}>
                   {away?.logo ? <Image source={{ uri: away.logo }} style={{ width: 54, height: 54 }} /> : null}
-                  <Text style={[s.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.away.name}</Text>
-                  <View style={s.heroSideTag}><Text style={s.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "AWAY"}</Text></View>
-                  <CountUp value={w.away * 100} decimals={1} suffix="%" style={[s.heroPct, { color: kitA }]} />
-                  <Text style={s.heroFair}>fair {fmtOdds(w.fair_odds.away)}</Text>
+                  <Text style={[sb.heroName, { marginTop: 6 }]} numberOfLines={1}>{p.away.name}</Text>
+                  <View style={sb.heroSideTag}><Text style={sb.heroSideTxt}>{p.neutral_venue ? "NEUTRAL" : "AWAY"}</Text></View>
+                  <CountUp value={w.away * 100} decimals={1} suffix="%" style={[sb.heroPct, { color: kitA }]} />
+                  <Text style={sb.heroFair}>fair {fmtOdds(w.fair_odds.away)}</Text>
                 </View>
               </View>
               <StackBar segs={[{ frac: w.home, color: kitH }, { frac: w.away, color: kitA }]} />
-              <View style={s.tileRow}>
-                <StatTile label="home court, pts" value={inp.home_court_pts > 0 ? `+${inp.home_court_pts}` : "0"} color={C.lime} dark />
+              <View style={sb.tileRow}>
+                <StatTile label="home court, pts" value={inp.home_court_pts > 0 ? `+${inp.home_court_pts}` : "0"} color={CB.lime} dark />
                 <StatTile label="rest edge" value={`${inp.rest_adjust > 0 ? "+" : ""}${inp.rest_adjust || 0}`} color={inp.rest_adjust ? C.amber : "#fff"} dark />
                 <StatTile label="injury edge" value={`${inp.injury_adjust > 0 ? "+" : ""}${inp.injury_adjust || 0}`} color={inp.injury_adjust ? C.amber : "#fff"} dark />
               </View>
@@ -1697,35 +1704,35 @@ function NbaPredictScreen({ api, meta }) {
             <Card delay={70}>
               <SectionTitle icon="grid" note="how far apart they finish">Winning margin</SectionTitle>
               {mrows.map(([l, v, c]) => <Row key={l} label={l} prob={v} color={c} max={mmax} />)}
-              <Text style={[s.dimTxt, { marginTop: 8 }]}>{p.margin_note}</Text>
+              <Text style={[sb.dimTxt, { marginTop: 8 }]}>{p.margin_note}</Text>
             </Card>
             <Card delay={100}>
               <SectionTitle icon="bar-chart-2" note={`${p.home.name} covers`}>Spread lines</SectionTitle>
               {p.spreads.map((x) => <Row key={x.line} label={`${x.line > 0 ? "+" : ""}${x.line}`} prob={x.home_cover} color={kitH} />)}
-              <Text style={s.axisNote}>negative = {p.home.name} giving points; the other side's cover chance is the remainder</Text>
+              <Text style={sb.axisNote}>negative = {p.home.name} giving points; the other side's cover chance is the remainder</Text>
               <SectionTitle icon="list" note="over">Total points</SectionTitle>
-              {p.totals.map((x) => <Row key={x.line} label={`${x.line}`} prob={x.over} color={C.lime} />)}
-              <Text style={s.axisNote}>projected total {pr.total.toFixed(1)}; typical spread about {inp.sd_total} points</Text>
+              {p.totals.map((x) => <Row key={x.line} label={`${x.line}`} prob={x.over} color={CB.lime} />)}
+              <Text style={sb.axisNote}>projected total {pr.total.toFixed(1)}; typical spread about {inp.sd_total} points</Text>
             </Card>
             <Card delay={130}>
               <SectionTitle icon="clock">At half-time</SectionTitle>
               <Row label={`${p.home.name} ahead`} prob={p.half_time.home} color={kitH} />
               <Row label={`${p.away.name} ahead`} prob={p.half_time.away} color={kitA} />
-              <Text style={s.axisNote}>projected half-time {p.half_time.proj_home}–{p.half_time.proj_away}</Text>
+              <Text style={sb.axisNote}>projected half-time {p.half_time.proj_home}–{p.half_time.proj_away}</Text>
             </Card>
             <Card delay={160}>
               <SectionTitle icon="users">Injuries and rest</SectionTitle>
               <Inj t={p.home} color={kitH} /><Inj t={p.away} color={kitA} />
-              <Text style={[s.axisNote, { marginTop: 8 }]}>Listed-out players cost about half their scoring average; doubtful or questionable a quarter. Load-management rest tags are not priced.</Text>
+              <Text style={[sb.axisNote, { marginTop: 8 }]}>Listed-out players cost about half their scoring average; doubtful or questionable a quarter. Load-management rest tags are not priced.</Text>
             </Card>
             {(p.h2h || []).length > 0 && (
               <Card delay={190}>
                 <SectionTitle icon="repeat" note="most recent first">Head to head</SectionTitle>
                 {p.h2h.map((g, i) => (
-                  <View key={i} style={s.meetRow}>
-                    <Text style={[s.meetDate, TNUM]}>{g.date.slice(0, 7)}</Text>
-                    <Text style={s.meetMatch} numberOfLines={1}>{g.away} @ {g.home}</Text>
-                    <Text style={[s.meetScore, TNUM]}>{g.score}</Text>
+                  <View key={i} style={sb.meetRow}>
+                    <Text style={[sb.meetDate, TNUM]}>{g.date.slice(0, 7)}</Text>
+                    <Text style={sb.meetMatch} numberOfLines={1}>{g.away} @ {g.home}</Text>
+                    <Text style={[sb.meetScore, TNUM]}>{g.score}</Text>
                   </View>))}
                 <SectionTitle icon="trending-up">Strength over time (Elo)</SectionTitle>
                 <EloLineChart histHome={p.elo_history.home} histAway={p.elo_history.away} nameHome={p.home.name} nameAway={p.away.name} />
@@ -1733,10 +1740,10 @@ function NbaPredictScreen({ api, meta }) {
             )}
             <Card delay={220}>
               <SectionTitle icon="divide">The math, with this game's numbers</SectionTitle>
-              <Text style={s.dimTxt}>Rating gap {inp.elo_gap > 0 ? "+" : ""}{inp.elo_gap} (one point of margin per 28 rating points) → {(inp.elo_gap * 0.0352).toFixed(1)} points, plus home court {inp.home_court_pts}{inp.rest_adjust ? `, rest ${inp.rest_adjust}` : ""}{inp.injury_adjust ? `, injuries ${inp.injury_adjust}` : ""}: projected margin {pr.margin > 0 ? "+" : ""}{pr.margin}. Actual margins scatter around that by about {inp.sd_margin} points, so the share of the curve above zero is the win chance, and every spread line is the same curve cut elsewhere. The total comes from each side's recent scoring against the other's recent defending.</Text>
+              <Text style={sb.dimTxt}>Rating gap {inp.elo_gap > 0 ? "+" : ""}{inp.elo_gap} (one point of margin per 28 rating points) → {(inp.elo_gap * 0.0352).toFixed(1)} points, plus home court {inp.home_court_pts}{inp.rest_adjust ? `, rest ${inp.rest_adjust}` : ""}{inp.injury_adjust ? `, injuries ${inp.injury_adjust}` : ""}: projected margin {pr.margin > 0 ? "+" : ""}{pr.margin}. Actual margins scatter around that by about {inp.sd_margin} points, so the share of the curve above zero is the win chance, and every spread line is the same curve cut elsewhere. The total comes from each side's recent scoring against the other's recent defending.</Text>
             </Card>
             {(p.caveats || []).map((c, i) => (
-              <View key={i} style={s.caveatRow}><Feather name="alert-triangle" size={13} color={C.amber} /><Text style={s.caveat}> {c}</Text></View>
+              <View key={i} style={sb.caveatRow}><Feather name="alert-triangle" size={13} color={C.amber} /><Text style={sb.caveat}> {c}</Text></View>
             ))}
             <NbaFixturesRow api={api} onLoad={loadPair} />
           </>
@@ -2674,10 +2681,10 @@ const makeStyles = (C) => StyleSheet.create({
   swapBtn: { alignItems: "center", justifyContent: "center", alignSelf: "center",
     marginTop: 8, width: 36, height: 36, borderWidth: 1, borderColor: C.line,
     borderRadius: 999, backgroundColor: C.panel },
-  slotSideTag: { alignSelf: "center", backgroundColor: "rgba(23,165,75,0.12)",
+  slotSideTag: { alignSelf: "center", backgroundColor: C.limeDim,
     borderWidth: 1, borderColor: C.lime, borderRadius: 999,
     paddingHorizontal: 10, paddingVertical: 2, marginBottom: 8 },
-  slotSideTxt: { color: "#0C7A36", fontSize: 10, fontWeight: "800", letterSpacing: 1.6 },
+  slotSideTxt: { color: C.limeDeep, fontSize: 10, fontWeight: "800", letterSpacing: 1.6 },
   heroSideTag: { alignSelf: "center", backgroundColor: "rgba(255,255,255,0.16)",
     borderRadius: 999, paddingHorizontal: 9, paddingVertical: 2, marginTop: 3 },
   heroSideTxt: { color: "rgba(255,255,255,0.85)", fontSize: 9, fontWeight: "800",
@@ -2759,3 +2766,4 @@ const makeStyles = (C) => StyleSheet.create({
   aboutTxt: { color: C.chalk, fontSize: 15, lineHeight: 23, marginTop: 8, marginBottom: 10 },
 });
 let s = makeStyles(C);
+const sb = makeStyles(CB);   // basketball screens
