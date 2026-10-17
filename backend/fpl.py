@@ -10,8 +10,10 @@ match model as everything else:
     by what our model expects his team to produce in this exact fixture
 
 Honest limits: player-vs-player marking data does not exist publicly; xPts is
-opponent-adjusted, not man-marking-adjusted. Early-season numbers lean on last
-season's rates until fresh minutes arrive.
+opponent-adjusted, not man-marking-adjusted. The FPL feed resets every player's
+minutes and expected stats at the start of a season, so early-season shares
+lean on a price prior (what the game charges for a player) that fades out over
+roughly five gameweeks of real minutes.
 """
 from __future__ import annotations
 
@@ -32,6 +34,7 @@ UA = {"User-Agent": "Mozilla/5.0 (Plus100)"}
 
 _cache: dict = {}
 TTL = 1800  # 30 min
+CACHE_MAX = 200     # entries; element summaries are fetched per player, so cap the growth
 
 # FPL short names -> our registry ids where normalization differs
 FPL_TEAM_ALIASES = {
@@ -41,6 +44,19 @@ FPL_TEAM_ALIASES = {
 POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 GOAL_PTS = {1: 10, 2: 6, 3: 5, 4: 4}
 CS_PTS = {1: 4, 2: 4, 3: 1, 4: 0}
+
+# Out-of-sample quality of the projection (scripts/fpl_quality2.py): rank
+# correlation with what players actually scored the FOLLOWING season, on 734
+# real season-to-season player pairs. Shown on the About page.
+FANTASY_EVAL = {
+    "pairs": 734,
+    "xg_only": 0.384, "record_only": 0.525, "blended": 0.543,
+    "measured": "2026-09-16",
+    "note": "Rank correlation with what players actually scored the FOLLOWING "
+            "season, measured on 734 real season-to-season pairs. Projecting from "
+            "shot quality alone ranks players at 0.38; a player's own scoring "
+            "record alone at 0.53; the shipped blend of both at 0.54.",
+}
 
 
 def _get(url: str):
@@ -52,6 +68,8 @@ def _get(url: str):
     r.raise_for_status()
     data = r.json()
     _cache[key] = (time.time(), data)
+    while len(_cache) > CACHE_MAX:
+        del _cache[min(_cache, key=lambda k: _cache[k][0])]      # drop the oldest
     return data
 
 
@@ -120,6 +138,11 @@ def next_gameweek(store: Store) -> dict:
     gws_played = max(0, (gw or 1) - 1)
     max_mins = max((e["minutes"] for e in els), default=0)
     maturity = min(max_mins / (90.0 * 5), 1.0)
+    # the gameweek's own average team xG and clean-sheet chance anchor the
+    # fixture factor in _xpts (an "average fixture" is this week's average)
+    ctx_all = [c for cs in fixture_ctx.values() for c in cs]
+    gw_xg = sum(c["team_xg"] for c in ctx_all) / max(len(ctx_all), 1)
+    gw_cs = sum(c["p_cs"] for c in ctx_all) / max(len(ctx_all), 1)
     pools: dict[int, dict] = {}
     for team_id in fixture_ctx:
         squad = [e for e in els if e["team"] == team_id]
@@ -132,7 +155,8 @@ def next_gameweek(store: Store) -> dict:
         pr = {e["id"]: max(e["now_cost"] - minp, 0) ** 1.3 for e in outf}
         pools[team_id] = {"g": pool_g, "a": pool_a, "pr": pr,
                           "prsum": sum(pr.values()) or 1e-9,
-                          "maturity": maturity, "gws": gws_played}
+                          "maturity": maturity, "gws": gws_played,
+                          "gw_xg": gw_xg, "gw_cs": gw_cs}
 
     players = []
     xp_all: dict[int, float] = {}       # EVERY playable player, not just the top 250
@@ -167,8 +191,9 @@ def next_gameweek(store: Store) -> dict:
         "teams_with_fixture": list(fixture_ctx.keys()),
         "preseason": gw == 1 and all(e["minutes"] == 0 for e in els[:50]),
         "note": ("Expected points for the next gameweek, adjusted for each player's actual "
-                 "opponent using the match model. Early in the season these lean on last "
-                 "season's playing time and output; they sharpen as minutes accumulate."),
+                 "opponent using the match model. Early in the season a player's share of his "
+                 "team's attack leans on his price as a prior; it shifts to his real minutes and "
+                 "expected stats over about five gameweeks."),
     }
 
 
@@ -313,9 +338,9 @@ def _xpts(e: dict, ctx: dict, pool: dict):
     form_pts = 0.0
     if ppg > 0 and mins > 0:
         if pos in (1, 2):
-            fixture = 0.55 + 0.45 * (ctx["p_cs"] / 0.26)
+            fixture = 0.55 + 0.45 * (ctx["p_cs"] / max(pool["gw_cs"], 1e-9))
         else:
-            fixture = 0.55 + 0.45 * (ctx["team_xg"] / 1.45)
+            fixture = 0.55 + 0.45 * (ctx["team_xg"] / max(pool["gw_xg"], 1e-9))
         fixture = max(0.55, min(1.6, fixture))
         form_pts = ppg * p_play * fixture
         w = FORM_WEIGHT * min(mins / FORM_CONF_MINUTES, 1.0)
@@ -393,7 +418,7 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
     # best legal XI, not just the 11 highest scorers regardless of position
     xi, cap_id, _vice_id = (_best_xi(squad, {p["id"]: p["xpts"] for p in squad})
                             if len(squad) >= 11 else (squad, None, None))
-    starters = xi if isinstance(xi, list) else squad[:11]
+    starters = xi
     best_captain = next((p for p in starters if p["id"] == cap_id),
                         starters[0] if starters else None)
     xi_total = round(sum(p["xpts"] for p in starters) +
@@ -434,7 +459,7 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
         advice = {"action": "transfer", **best,
                   "reason": (f"Use a free transfer: {best['out']} "
                              f"({best['out_xpts']} xPts) out, {best['in']} "
-                             f"({best['in_xpts']} xPts) in — {best['gain']} more projected "
+                             f"({best['in_xpts']} xPts) in: {best['gain']} more projected "
                              f"points this week, within your budget (£{bank:.1f}m banked). "
                              "We only ever suggest one move at a time; you may have "
                              "more free transfers banked (the game lets you keep up "
@@ -442,7 +467,7 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
     else:
         advice = {"action": "hold",
                   "reason": ((f"The best affordable swap gains only "
-                              f"{best['gain']:.1f} projected points — inside projection "
+                              f"{best['gain']:.1f} projected points, inside projection "
                               "noise. ") if best else
                              "No affordable, rule-legal upgrade exists this week. ")
                             + "Bank the free transfer; it rolls over."}
@@ -462,23 +487,17 @@ def entry_analysis(store: Store, entry_id: int) -> dict:
 
 
 # ---------------- the persistent model team ----------------
-# One shared squad that PLAYS BY THE RULES: seeded once, then at most the banked
-# free transfers each gameweek (never a hit), selling-price simplification noted.
+# One shared squad that PLAYS BY THE RULES: built once a season from that
+# gameweek's expected points, then at most the banked free transfers each
+# gameweek (never a hit), selling-price simplification noted. Scoring starts at
+# the gameweek the squad was created; nothing is back-scored.
 # State lives in Supabase (fpl_state) so it survives restarts; local file fallback.
 
 _MODEL_LOCK = threading.Lock()
 STATE_FILE = Path(__file__).resolve().parent.parent / "data" / "fpl_state.json"
 GAIN_BAR = 0.7        # below this a swap is projection noise: bank the transfer
-
-SEED = [  # the squad the app recommended and the user actually built (GW1, £99.5m)
-    ("Kelleher", "GK"), ("Virgil", "DEF"), ("O'Reilly", "DEF"), ("Tarkowski", "DEF"),
-    ("Guéhi", "DEF"), ("Gibbs-White", "MID"), ("Dewsbury-Hall", "MID"), ("Bruno G.", "MID"),
-    ("Haaland", "FWD"), ("Thiago", "FWD"), ("João Pedro", "FWD"),
-    ("Dubravka", "GK"), ("van Ewijk", "DEF"), ("Reed", "MID"), ("Hughes", "MID"),
-]
-SEED_XI = ["Kelleher", "Virgil", "O'Reilly", "Tarkowski", "Guéhi",
-           "Gibbs-White", "Dewsbury-Hall", "Bruno G.", "Haaland", "Thiago", "João Pedro"]
-SEED_CAPTAIN, SEED_VICE = "Haaland", "Kelleher"
+SQUAD_SLOTS = {"GK": 2, "DEF": 5, "MID": 5, "FWD": 3}
+BUDGET = 100.0
 FORMATIONS_XI = [(3, 4, 3), (3, 5, 2), (4, 3, 3), (4, 4, 2), (4, 5, 1),
                  (5, 2, 3), (5, 3, 2), (5, 4, 1)]
 
@@ -620,6 +639,34 @@ def _best_xi(squad: list, xp: dict):
     return xi, ranked[0]["id"], ranked[1]["id"] if len(ranked) > 1 else ranked[0]["id"]
 
 
+def _seed_squad(els: dict, xp: dict) -> list[dict] | None:
+    """A legal 15 for a fresh season, chosen greedily by this gameweek's expected
+    points: take the best remaining available player whose price still leaves
+    enough to fill the empty slots at the cheapest price per position (2 GK,
+    5 DEF, 5 MID, 3 FWD, at most three per club, 100.0 budget). None if the
+    constraints cannot be met."""
+    cands = [{"id": e["id"], "name": e["web_name"], "pos": POS[e["element_type"]],
+              "team": e["team"], "buy": e["now_cost"] / 10, "xpts": xp.get(e["id"], 0.0)}
+             for e in els.values() if e["status"] not in ("i", "s", "u", "n")]
+    floor = {pos: min((c["buy"] for c in cands if c["pos"] == pos), default=None) for pos in SQUAD_SLOTS}
+    if any(v is None for v in floor.values()):
+        return None
+    need, clubs, spent, squad = dict(SQUAD_SLOTS), {}, 0.0, []
+    for c in sorted(cands, key=lambda c: (-c["xpts"], c["buy"])):
+        if need[c["pos"]] == 0 or clubs.get(c["team"], 0) >= 3:
+            continue
+        rest = sum((need[pos] - (pos == c["pos"])) * floor[pos] for pos in need)
+        if spent + c["buy"] + rest > BUDGET + 1e-9:
+            continue
+        squad.append({k: c[k] for k in ("id", "name", "pos", "team", "buy")})
+        spent += c["buy"]
+        clubs[c["team"]] = clubs.get(c["team"], 0) + 1
+        need[c["pos"]] -= 1
+        if not any(need.values()):
+            return squad
+    return None
+
+
 def _sell_price(buy: float, now: float) -> float:
     """Real FPL selling price: full price when it fell, purchase price plus half
     of any rise (rounded down to £0.1m) when it climbed."""
@@ -655,34 +702,22 @@ def _model_squad_locked(store: Store) -> dict:
     st = state_get("model_squad")
     if st and st.get("season") and st["season"] != season:
         # new season: element ids reshuffle, so last season's state would render
-        # garbage — archive it and start fresh from the seed
+        # garbage. Archive it and build a fresh squad from this week's xPts.
         state_put(f"model_squad_{st['season']}", st)
         st = None
     if not st:
-        squad = []
-        for name, pos in SEED:
-            cands = [e for e in boot["elements"]
-                     if e["web_name"] == name and POS[e["element_type"]] == pos]
-            if not cands:
-                return {"error": "seed_failed", "detail": f"couldn't resolve {name}"}
-            e = min(cands, key=lambda e: e["now_cost"])
-            squad.append({"id": e["id"], "name": e["web_name"], "pos": pos,
-                          "team": e["team"], "buy": e["now_cost"] / 10})
-        xi_ids = []
-        for n in SEED_XI:
-            xi_ids.append(next(p["id"] for p in squad if p["name"] == n))
-        cap = next(p["id"] for p in squad if p["name"] == SEED_CAPTAIN)
-        vice = next(p["id"] for p in squad if p["name"] == SEED_VICE)
-        st = {"created_gw": gw, "gw": gw, "evaluated_gw": gw - 1, "banked": 1,
-              "bank": round(100.0 - sum(p["buy"] for p in squad), 1),
+        squad = _seed_squad(els, xp)
+        if not squad:
+            return {"error": "seed_failed", "detail": "could not build a legal 15 within the budget"}
+        xi, cap, vice = _best_xi(squad, xp)
+        xi_ids = [p["id"] for p in xi]
+        st = {"created_gw": gw, "gw": gw, "evaluated_gw": gw, "banked": 0,
+              "bank": round(BUDGET - sum(p["buy"] for p in squad), 1),
               "season": season,
               "squad": squad, "xi": xi_ids, "captain": cap, "vice": vice,
-              "xi_history": {}, "transfers": [], "scores": []}
-        # the squad was held from GW1, so earlier rounds use this exact snapshot
-        for g in range(1, gw + 1):
-            st["xi_history"][str(g)] = {"xi": xi_ids, "captain": cap, "vice": vice,
-                                        "squad": [{"id": p["id"], "pos": p["pos"]}
-                                                  for p in squad]}
+              "xi_history": {str(gw): {"xi": xi_ids, "captain": cap, "vice": vice,
+                                       "squad": [{"id": p["id"], "pos": p["pos"]} for p in squad]}},
+              "transfers": [], "scores": []}
         state_put("model_squad", st)
 
     st.setdefault("xi_history", {})
@@ -690,37 +725,25 @@ def _model_squad_locked(store: Store) -> dict:
     if not st.get("season"):
         st["season"] = season
         dirty = True
-    if not st["xi_history"]:
-        # state predates snapshots: rounds before the first transfer were played
-        # with the deterministic seed squad — reconstruct those snapshots
-        try:
-            seed_ids = {}
-            for name, pos in SEED:
-                cands = [e for e in boot["elements"]
-                         if e["web_name"] == name and POS[e["element_type"]] == pos]
-                if cands:
-                    seed_ids[name] = min(cands, key=lambda e: e["now_cost"])["id"]
-            sq = [{"id": seed_ids[n], "pos": p} for n, p in SEED if n in seed_ids]
-            xi_ids = [seed_ids[n] for n in SEED_XI if n in seed_ids]
-            first_tr = min((t["gw"] for t in st["transfers"]), default=st["gw"] + 1)
-            for g in range(1, first_tr):
-                st["xi_history"][str(g)] = {
-                    "xi": xi_ids, "captain": seed_ids.get(SEED_CAPTAIN),
-                    "vice": seed_ids.get(SEED_VICE), "squad": sq}
-            dirty = True
-        except Exception:  # noqa: BLE001
-            pass
+    # the team exists from created_gw: rounds before it were never played by it
+    kept = [sc for sc in st["scores"] if sc["gw"] >= st["created_gw"]]
+    if len(kept) != len(st["scores"]):
+        st["scores"] = kept
+        dirty = True
 
     # ---- score every finished round not yet on the board, each with the XI and
     # squad that were actually held that week (snapshotted at evaluation time)
     for g in sorted(finished):
-        if str(g) not in st["xi_history"] and g < st["created_gw"]:
+        if g < st["created_gw"] or any(sc["gw"] == g for sc in st["scores"]):
             continue
-        if any(s["gw"] == g for s in st["scores"]):
-            continue
-        snap = st["xi_history"].get(str(g)) or {
-            "xi": st["xi"], "captain": st["captain"], "vice": st["vice"],
-            "squad": [{"id": p["id"], "pos": p["pos"]} for p in st["squad"]]}
+        snap = st["xi_history"].get(str(g))
+        if snap is None:
+            # no request arrived that week, so no transfer was made: the squad
+            # held was the latest earlier snapshot (never the live squad)
+            earlier = [int(k) for k in st["xi_history"] if int(k) < g]
+            if not earlier:
+                continue
+            snap = st["xi_history"][str(max(earlier))]
         try:
             pts = _score_round(snap["squad"], snap["xi"], snap["captain"],
                                snap["vice"], g)
@@ -838,9 +861,12 @@ def _model_squad_locked(store: Store) -> dict:
         "this_week": this_week,
         "held": not this_week,
         "durable": _sb_conf() is not None,
-        "note": ("This team obeys the real rules: it changes only through free "
+        "created_gw": st["created_gw"],
+        "note": (f"This team has existed since gameweek {st['created_gw']} and obeys the real "
+                 "rules: it changes only through free "
                  "transfers (one earned per gameweek, up to five banked, never a "
                  "points hit), inside the budget with real selling prices (half "
                  "of any price rise), max three per club. Chips like the wildcard, "
-                 "free hit, bench boost and triple captain are not used."),
+                 "free hit, bench boost and triple captain are not used. Scoring starts "
+                 "from the week it was built."),
     }

@@ -1,8 +1,10 @@
 """FastAPI app: team search, head-to-head stats, predictions, lineups, fantasy, odds."""
 from __future__ import annotations
 
+import csv
 import hashlib
 import hmac
+import io
 import json
 import math
 import os
@@ -10,7 +12,8 @@ import re
 import threading
 import time
 import unicodedata
-import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -20,14 +23,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .data_store import get_store, norm_key, slug
+from . import fpl as _fpl
+from .data_store import DIV_RANK, LEAGUE_NAMES, get_store, norm_key, season_start, slug
 from .fpl import club_squad as fpl_squad
-from .model import expected_goals, likely_scorers, likely_scorers_club, predict
+from .model import expected_goals, likely_scorers, predict
 
 ROOT = Path(__file__).resolve().parent.parent
 LOGO_CACHE_FILE = ROOT / "data" / "logo_cache.json"
-PLAYER_TEAM_CACHE_FILE = ROOT / "data" / "player_team_cache.json"
 UA = {"User-Agent": "Mozilla/5.0 (FootballAnalytics; personal research tool)"}
+# one pool for the per-request fan-out to upstream feeds (two teams at a time)
+_pool = ThreadPoolExecutor(max_workers=8, thread_name_prefix="plus100-io")
 
 app = FastAPI(title="Plus100 Football Predictor")
 
@@ -39,7 +44,7 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)   # player lists shrink ~8
 
 # The model store takes a couple of minutes to build on a cold machine (it
 # downloads the full match history first). Build it in the background so the
-# web server binds its port immediately — cloud hosts kill services that do
+# web server binds its port immediately; cloud hosts kill services that do
 # not answer within a few minutes of starting.
 store = None
 warmup = {"ready": False, "error": None, "since": time.time()}
@@ -58,8 +63,7 @@ def _warm_up() -> None:
             warmup["ready"] = True
             warmup["error"] = None
             from .refresher import start_background
-            start_background()
-            threading.Thread(target=_prewarm, daemon=True, name="plus100-prewarm").start()
+            start_background()          # also starts the cache prewarm
             threading.Thread(target=_keepalive, daemon=True, name="plus100-keepalive").start()
             return
         except Exception as e:  # noqa: BLE001
@@ -134,16 +138,12 @@ def healthz():
 def _require_store():
     if store is None:
         raise HTTPException(503, "Model is still starting up. First boot downloads the "
-                                 "match history and takes a couple of minutes — try again shortly.")
+                                 "match history and takes a couple of minutes. Try again shortly.")
 
 _logo_lock = threading.Lock()
 _logo_cache: dict[str, dict | str | None] = (
     json.loads(LOGO_CACHE_FILE.read_text()) if LOGO_CACHE_FILE.exists() else {}
 )
-_player_team_cache: dict[str, str | None] = (
-    json.loads(PLAYER_TEAM_CACHE_FILE.read_text()) if PLAYER_TEAM_CACHE_FILE.exists() else {}
-)
-_news_cache: dict[str, tuple[float, list]] = {}
 
 
 def _team_or_404(tid: str) -> dict:
@@ -162,7 +162,7 @@ def team_search(q: str = Query("", max_length=60), limit: int = 12):
         return []
     scored = []
     for tid, r in store.registry.items():
-        nk = norm_key(r["name"])
+        nk = r["nk"]
         if key not in nk:
             continue
         score = (0 if nk.startswith(key) else 1,
@@ -171,7 +171,7 @@ def team_search(q: str = Query("", max_length=60), limit: int = 12):
         scored.append((score, {
             "id": tid, "name": r["name"], "league": r["league_name"],
             "country": r["country"], "scope": r["scope"],
-            "elo": r["elo_global"], "active": r["active"],
+            "elo": r["elo_global"], "elo_basis": r["elo_basis"], "active": r["active"],
         }))
     scored.sort(key=lambda t: t[0])
     return [x for _, x in scored[:limit]]
@@ -189,8 +189,6 @@ def _form(tid: str, n: int = 8) -> list[dict]:
             "venue": "H" if is_home else "A",
             "score": f"{int(gf)}-{int(ga)}",
             "result": "W" if gf > ga else ("L" if gf < ga else "D"),
-            "competition": r.tournament if r.scope == "intl" else
-                           store.registry.get(tid, {}).get("league_name", ""),
         })
     return out[::-1]
 
@@ -213,14 +211,11 @@ def h2h(home: str, away: str):
         "date": str(r.date.date()),
         "home": r.home, "away": r.away,
         "score": f"{int(r.hg)}-{int(r.ag)}",
-        "competition": r.tournament if r.scope == "intl" else
-                       f"{r.league} {r.season}",
     } for _, r in hh.tail(12).iloc[::-1].iterrows()]
 
     def elo_series(tid: str, points: int = 60) -> list:
         h = store.elo_hist.get(tid, [])
-        step = max(1, len(h) // points)
-        return [[str(pd.Timestamp(d).date()), round(e)] for d, e in h[::step]][-points:]
+        return [[str(pd.Timestamp(d).date()), round(e)] for d, e in h[-points:]]
 
     return {
         "summary": {
@@ -241,76 +236,6 @@ def h2h(home: str, away: str):
     }
 
 
-_ABSENCE_PATTERNS = [re.compile(rx) for rx in (
-    r"\binjur", r"\bruled out\b", r"\bout for\b", r"\bsidelined\b",
-    r"\bdoubt(?:ful)?\b", r"\bsuspend", r"\bbanned\b", r"\bsurgery\b",
-    r"\bhamstring\b", r"\bacl\b", r"\bfracture\b", r"\bmiss(?:es|ing)?\b")]
-_DEPARTURE_PATTERNS = [re.compile(rx) for rx in (
-    r"\bsigns? for\b", r"\bsold to\b", r"\bcompletes? (?:a )?(?:move|transfer)\b",
-    r"\btransfer agreed\b", r"\bdeparts\b", r"\b(?:leaves|left) the club\b",
-    r"\bloan move to\b")]
-# headlines that mean the OPPOSITE of an absence: "Wood returns from injury",
-# "no doubt over Saka", "Isak back in training after injury scare" — any of
-# these vetoes the whole title so good news never flags a player out
-_RECOVERY_PATTERNS = [re.compile(rx) for rx in (
-    r"\breturn(?:s|ed|ing)?\b", r"\bback in\b", r"\bback from\b",
-    r"\bfit\b", r"\bfitness boost\b", r"\bboost\b", r"\bno doubts?\b",
-    r"\bavailable\b", r"\brecover(?:s|ed|ing|y)?\b", r"\bin contention\b",
-    r"\bshakes? off\b", r"\bpasses? fit\b", r"\bwins? .{0,20}race\b",
-    r"\bnew (?:deal|contract)\b", r"\bcontract extension\b", r"\bextends?\b")]
-
-
-def _fold(s: str) -> str:
-    """Lowercase, accent-stripped, spaces preserved — safe for word-boundary matching."""
-    return re.sub(r"[^a-z0-9 ]", " ",
-                  unicodedata.normalize("NFKD", str(s))
-                  .encode("ascii", "ignore").decode().lower())
-
-
-def _news_scan(tid: str, names: list[str], patterns: list,
-               vetoes: list | None = None) -> list[str]:
-    try:
-        items = news(tid)["items"]
-    except Exception:  # noqa: BLE001
-        return []
-    hits = []
-    for n in names:
-        parts = [w for w in str(n).split() if len(w) > 3]
-        if not parts:
-            continue
-        last = _fold(parts[-1]).strip()
-        if len(last) < 4:
-            continue
-        name_rx = re.compile(r"\b" + re.escape(last) + r"\b")
-        for it in items:
-            title = _fold(it.get("title") or "")
-            if not name_rx.search(title):
-                continue
-            if vetoes and any(v.search(title) for v in vetoes):
-                continue
-            if any(p.search(title) for p in patterns):
-                hits.append(n)
-                break
-    return hits
-
-
-def _news_absences(tid: str, names: list[str]) -> list[str]:
-    """Players from `names` the news says are injured/suspended OR have left the
-    club — either way they should not appear in a line-up or count toward goals.
-    Good-news headlines veto a hit; a transfer TO this club is an arrival, not a
-    departure, so the club's own name after "to/joins" vetoes the departure side."""
-    outs = _news_scan(tid, names, _ABSENCE_PATTERNS, _RECOVERY_PATTERNS)
-    dep_veto = list(_RECOVERY_PATTERNS)
-    team = _fold(store.registry.get(tid, {}).get("name", "")).strip()
-    if len(team) >= 4:
-        dep_veto.append(re.compile(
-            r"\b(?:to|joins?|joining|for)\s+" + re.escape(team) + r"\b"))
-    for n in _news_scan(tid, names, _DEPARTURE_PATTERNS, dep_veto):
-        if n not in outs:
-            outs.append(n)
-    return outs
-
-
 def _match_tracked(flag_name: str, tracked: list[str]) -> str | None:
     """Map an FPL web name like "M.Salah" onto a tracked full name."""
     parts = [w for w in re.split(r"[ .]", str(flag_name)) if len(w) > 2]
@@ -326,22 +251,30 @@ def _match_tracked(flag_name: str, tracked: list[str]) -> str | None:
 
 
 def _auto_absences(tid: str) -> list[str]:
-    """Likely absentees among the players our model tracks, from two live
-    sources: the official FPL availability flags (PL clubs, updated daily by the
-    league) and team-news headlines (everyone else)."""
+    """Likely absentees among the players our model tracks, from official live
+    sources only: the FPL availability flags (PL clubs, published daily by the
+    league) and the injury flags on ESPN's current squad list. No headline
+    guessing: a side with no official feed simply gets no absences."""
     reg = store.registry.get(tid, {})
-    if reg.get("scope") == "club":
-        names = [r["player"] for r in store.player_rates.get(tid, [])[:12]]
-    else:
-        sg = store.scorer_goals
-        names = list(sg[sg.team == reg.get("name", "")].sort_values(
-            "wgoals", ascending=False).scorer.head(10))
-    # headlines are a noisy source, so cap them at the three most important
-    # players; the official FPL availability flags below are authoritative
-    # and are never capped
-    outs = _news_absences(tid, names)[:3]
-    if reg.get("scope") == "club":
-        outs = _fpl_flagged_outs(tid, names, outs)
+    if reg.get("scope") != "club":
+        return []
+    names = [r["player"] for r in store.player_rates.get(tid, [])[:12]]
+    outs = _espn_flagged_outs(tid, names, [])
+    return _fpl_flagged_outs(tid, names, outs)
+
+
+def _espn_flagged_outs(tid: str, names: list[str], outs: list[str]) -> list[str]:
+    """Append tracked players ESPN's squad list marks as injured. Official feed,
+    never capped; no-op when the roster is unavailable."""
+    try:
+        from . import espn
+        for p in espn.soccer_roster(store, tid) or []:
+            if p.get("injured"):
+                hit = _match_tracked(p["name"], names)
+                if hit and hit not in outs:
+                    outs.append(hit)
+    except Exception:  # noqa: BLE001
+        pass
     return outs
 
 
@@ -361,7 +294,7 @@ def _fpl_flagged_outs(tid: str, names: list[str], outs: list[str]) -> list[str]:
 
 def _effective_elo(tid: str, outs: list[str]) -> dict:
     """Today's usable strength: the learned rating, discounted for absent players
-    via the fitted elo→goals curve (so the discount speaks the model's language)."""
+    via the fitted elo-to-goals curve (so the discount speaks the model's language)."""
     t = store.registry[tid]
     base = float(t["elo_global"])
     from .model import _absence_factor
@@ -369,9 +302,7 @@ def _effective_elo(tid: str, outs: list[str]) -> dict:
     fit = store.goal_fit_club if t["scope"] == "club" else store.goal_fit_intl
     b = (abs(fit["b"]) + abs(fit["e"])) / 2 or 1.0
     delta = 400.0 * math.log(max(factor, 0.6)) / b
-    return {"elo": round(base), "elo_effective": round(base + delta),
-            "elo_delta": round(delta),
-            "outs_priced_in": [a["player"] for a in applied]}
+    return {"elo": round(base), "elo_effective": round(base + delta), "elo_delta": round(delta)}
 
 
 @app.get("/api/teamstate")
@@ -379,11 +310,7 @@ def teamstate(team_id: str):
     """Live team condition for the pickers: dynamic rating + who is missing."""
     _team_or_404(team_id)
     outs = _auto_absences(team_id)
-    eff = _effective_elo(team_id, outs)
-    return {"id": team_id, **eff, "outs": outs,
-            "ratings_updated": refresher_state.get("last_refresh"),
-            "note": ("The rating re-learns from every result at each data refresh; "
-                     "the effective number additionally discounts today's absentees.")}
+    return {"id": team_id, **_effective_elo(team_id, outs), "outs": outs}
 
 
 @app.get("/api/predict")
@@ -396,30 +323,13 @@ def predict_endpoint(request: Request, home: str, away: str, neutral: bool = Fal
     oh = [p.strip() for p in out_home.split("|") if p.strip()]
     oa = [p.strip() for p in out_away.split("|") if p.strip()]
     # No manual list given: scan team news for likely absentees so the numbers
-    # reflect who can actually play, not just the two crests.
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_h = ex.submit(lambda: [] if oh else _auto_absences(home))
-        f_a = ex.submit(lambda: [] if oa else _auto_absences(away))
-        auto_oh, auto_oa = f_h.result(), f_a.result()
+    # reflect who can actually play, not just the two crests. predict() writes
+    # the caveat for every absentee it prices or cannot price.
+    f_h = _pool.submit(lambda: [] if oh else _auto_absences(home))
+    f_a = _pool.submit(lambda: [] if oa else _auto_absences(away))
+    auto_oh, auto_oa = f_h.result(), f_a.result()
     p = predict(store, home, away, neutral, out_home=oh or auto_oh,
                 out_away=oa or auto_oa, context=context)
-    _verify_squads(p)
-    applied = {a["player"] for side in ("home", "away")
-               for a in (p.get("absences", {}).get(side) or [])}
-    for team_name, outs in ((p["home"]["name"], auto_oh), (p["away"]["name"], auto_oa)):
-        if not outs:
-            continue
-        reduced = [n for n in outs if n in applied]
-        listed = [n for n in outs if n not in applied]
-        if reduced:
-            p.setdefault("caveats", []).append(
-                f"Team news suggests {', '.join(reduced)} may be unavailable for {team_name}; "
-                "the goal expectation was reduced for the minutes they usually provide.")
-        if listed:
-            p.setdefault("caveats", []).append(
-                f"{', '.join(listed)} flagged as possibly unavailable for {team_name} "
-                "(no per-player goal data for this team, so the numbers are unchanged).")
     try:
         p["home"] |= _effective_elo(home, (oh or auto_oh))
         p["away"] |= _effective_elo(away, (oa or auto_oa))
@@ -464,37 +374,6 @@ def bestbets_endpoint(key: str = "", home: str = "", away: str = ""):
     if not k:
         return {"error": "no_key", "detail": "No API key configured."}
     return best_bets(k, store, sel_home=home.strip(), sel_away=away.strip())
-
-
-@app.get("/api/news")
-def news(team_id: str):
-    """Injury & team news headlines via Google News RSS. Context only."""
-    t = _team_or_404(team_id)
-    key = t["name"]
-    now = time.time()
-    if key in _news_cache and now - _news_cache[key][0] < 1800:
-        return {"team": key, "items": _news_cache[key][1]}
-    items, fetch_failed = [], False
-    try:
-        q = f'"{key}" football (injury OR "team news" OR lineup)'
-        r = requests.get("https://news.google.com/rss/search",
-                         params={"q": q, "hl": "en-US", "gl": "US", "ceid": "US:en"},
-                         headers=UA, timeout=8)
-        root = ET.fromstring(r.content)
-        for it in root.findall(".//item")[:8]:
-            src = it.find("{https://news.google.com/rss}source")
-            items.append({
-                "title": it.findtext("title") or "",
-                "link": it.findtext("link") or "",
-                "date": (it.findtext("pubDate") or "")[:16],
-                "source": src.text if src is not None else "",
-            })
-    except Exception:  # noqa: BLE001
-        fetch_failed = True
-    if not (fetch_failed and not items):    # a failed fetch shouldn't blank the
-        _news_cache[key] = (now, items)     # team's news for the next 30 minutes
-    return {"team": key, "items": items,
-            "disclaimer": "Headlines are context only; they are not part of the statistical model."}
 
 
 # football-data short names that TheSportsDB doesn't know under that spelling:
@@ -620,7 +499,8 @@ _lineup_lock = threading.Lock()
 _lineup_cache: dict = (
     json.loads(LINEUP_CACHE_FILE.read_text()) if LINEUP_CACHE_FILE.exists() else {}
 )
-_SQUAD_TTL = 86400   # squads refresh daily
+_SQUAD_TTL = 86400           # squads refresh daily
+_PLAYER_TTL = 5 * 86400      # a player's record (position, photo) is re-checked every few days
 _STAFF_WORDS = ("manager", "coach", "assistant", "director", "physio", "analyst", "scout")
 
 
@@ -696,8 +576,10 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
     key = f"p2:{norm_key(team_name)}:{norm_key(name)}"
     with _lineup_lock:
         hit = _lineup_cache.get(key)
-    if hit is not None:
-        return hit or None
+    # entries are {"at": ts, "player": dict | None}; older shapes are simply refetched.
+    # Callers get a copy so the p_score they attach never lands in the cache file.
+    if isinstance(hit, dict) and "at" in hit and time.time() - hit["at"] < _PLAYER_TTL:
+        return dict(hit["player"]) if hit["player"] else None
     qk = norm_key(name)
     tk = norm_key(team_name)
     gated, exact_only = None, None
@@ -738,25 +620,22 @@ def _player_lookup(name: str, team_name: str, intl: bool) -> dict | None:
         return None
     best = gated or exact_only
     with _lineup_lock:
-        _lineup_cache[key] = best or False
+        _lineup_cache[key] = {"at": time.time(), "player": best}
         try:
             LINEUP_CACHE_FILE.write_text(json.dumps(_lineup_cache))
         except OSError:
             pass
-    return best
+    return dict(best) if best else None
 
 
-
-# Real shapes managers actually pick, in rough order of how common they are.
-# A line-up is only ever shown as one of these, so no 1-3-3 nonsense can appear.
-FORMATIONS = [(4, 3, 3), (4, 4, 2), (4, 2, 3, 1), (3, 5, 2), (4, 5, 1),
-              (3, 4, 3), (5, 3, 2), (5, 4, 1), (4, 1, 4, 1)]
+# Standard shapes (defenders, midfielders, forwards), most common first. A
+# line-up is only ever shown as one of these, so no 1-3-3 nonsense can appear.
+FORMATIONS = [(4, 3, 3), (4, 4, 2), (4, 5, 1), (3, 5, 2), (3, 4, 3), (5, 3, 2), (5, 4, 1)]
 
 
 def _pick_formation(n_def: int, n_mid: int, n_fwd: int) -> tuple[int, int, int] | None:
-    """The most conventional shape the available players can actually fill."""
-    for f in FORMATIONS:
-        d, m, fw = f[0], sum(f[1:-1]), f[-1]
+    """The most common standard shape the available players can fill."""
+    for d, m, fw in FORMATIONS:
         if d <= n_def and m <= n_mid and fw <= n_fwd:
             return d, m, fw
     return None
@@ -764,17 +643,14 @@ def _pick_formation(n_def: int, n_mid: int, n_fwd: int) -> tuple[int, int, int] 
 
 def _team_lineup(tid: str, lam: float) -> dict:
     t = _team_or_404(tid)
-    reg = store.registry[tid]
-    if reg.get("scope") == "club":
-        scorers = likely_scorers_club(store, tid, lam)
-    else:
-        scorers = likely_scorers(store, t["name"], lam)
+    club = t["scope"] == "club"
+    scorers = likely_scorers(store, tid, t, lam)
     p_by_key = {norm_key(s["player"]): s["prob_to_score"] for s in scorers}
 
     # Premier League clubs: the FPL API gives the COMPLETE current squad with
     # positions, availability and minutes, so it beats the partial public feed.
     squad, source = [], "public squad data"
-    if reg.get("scope") == "club":
+    if club:
         try:
             squad = [dict(p) for p in fpl_squad(store, tid)]
         except Exception:  # noqa: BLE001
@@ -785,8 +661,7 @@ def _team_lineup(tid: str, lam: float) -> dict:
     if not squad:
         try:
             from . import espn
-            roster = espn.soccer_roster(store, tid) if reg.get("scope") == "club" \
-                else espn.intl_roster(t["name"])
+            roster = espn.soccer_roster(store, tid) if club else espn.intl_roster(t["name"])
         except Exception:  # noqa: BLE001
             roster = []
         if len(roster) >= 11:
@@ -795,18 +670,6 @@ def _team_lineup(tid: str, lam: float) -> dict:
             source = "the current squad list"
     if not squad:
         squad = [dict(p) for p in _tsdb_squad(tid)]
-        # the public feed lags transfers: drop anyone whose CURRENT club, per a
-        # per-player lookup (cached on disk), is verifiably somewhere else
-        if reg.get("scope") == "club":
-            verified = []
-            for p in squad:
-                cur = _player_current_team(p["name"])
-                if cur and norm_key(cur) != norm_key(t["name"]) \
-                        and norm_key(t["name"]) not in norm_key(cur):
-                    continue
-                verified.append(p)
-            if len(verified) >= 4:      # keep the filter only when it leaves a core
-                squad = verified
     have = {norm_key(p["name"]) for p in squad}
 
     def match_prob(name: str) -> float | None:
@@ -836,7 +699,7 @@ def _team_lineup(tid: str, lam: float) -> dict:
             p["minutes"] = m or 0
 
     # top scorers missing from the squad list get looked up individually
-    intl = reg.get("scope") != "club"
+    intl = not club
     extra_budget = 5
     for s in scorers:
         if extra_budget == 0:
@@ -851,11 +714,10 @@ def _team_lineup(tid: str, lam: float) -> dict:
             squad.append(info)
             have.add(norm_key(info["name"]))
 
-    # drop players the news says are out — but never empty a position doing it,
-    # or a single injury headline can leave a side with no keeper or no striker
-    outs = _news_absences(tid, [p["name"] for p in squad])
-    outs += [n for n in espn_outs if n not in outs]     # the roster's own injury flags
-    if reg.get("scope") == "club":
+    # drop players the official feeds flag as out (ESPN squad injury flags, FPL
+    # availability), but never empty a position doing it
+    outs = list(espn_outs)
+    if club:
         outs = _fpl_flagged_outs(tid, [p["name"] for p in squad], outs)
     if outs:
         kept, dropped = [], []
@@ -936,78 +798,17 @@ def lineup(home: str, away: str, neutral: bool = False):
     _team_or_404(home)
     _team_or_404(away)
     eg = expected_goals(store, home, away, neutral=neutral)
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=2) as ex:
-        f_h = ex.submit(_team_lineup, home, eg["lambda_home"])
-        f_a = ex.submit(_team_lineup, away, eg["lambda_away"])
-        h, a = f_h.result(), f_a.result()
+    f_h = _pool.submit(_team_lineup, home, eg["lambda_home"])
+    f_a = _pool.submit(_team_lineup, away, eg["lambda_away"])
+    h, a = f_h.result(), f_a.result()
     srcs = sorted({h["source"], a["source"]})
     return {
         "home": h, "away": a,
         "note": (f"Built from {' and '.join(srcs)}, ranked by playing time and each "
-                 "player's share of his team's expected goals, then arranged in the "
-                 "most likely formation those players can field. Real team sheets drop "
+                 "player's share of his team's expected goals, then arranged in a "
+                 "standard formation those players can fill. Real team sheets drop "
                  "about an hour before kickoff and can differ."),
     }
-
-
-_PLAYER_TEAM_TTL = 5 * 86400   # transfers happen: re-verify a club every few days
-
-
-def _player_current_team(player: str) -> str | None:
-    """Player's current club per TheSportsDB, cached on disk WITH an expiry so a
-    transfer is picked up within days (an eternal cache kept ghosts in line-ups)."""
-    key = norm_key(player)
-    hit = _player_team_cache.get(key)
-    if isinstance(hit, str) or hit is None and key in _player_team_cache:
-        hit = {"team": hit if isinstance(hit, str) else None, "ts": 0}   # legacy entry
-    if isinstance(hit, dict) and time.time() - hit.get("ts", 0) < _PLAYER_TEAM_TTL:
-        return hit.get("team")
-    team = None
-    try:
-        r = requests.get("https://www.thesportsdb.com/api/v1/json/123/searchplayers.php",
-                         params={"p": player}, headers=UA, timeout=6)
-        if r.status_code == 200:
-            players = (r.json() or {}).get("player") or []
-            soccer = [x for x in players if x.get("strSport") == "Soccer"
-                      and norm_key(x.get("strPlayer", "")) == key]
-            if soccer:
-                team = soccer[0].get("strTeam")
-        else:
-            # rate limited: keep whatever we knew, do not overwrite with unknown
-            return hit.get("team") if isinstance(hit, dict) else None
-    except Exception:  # noqa: BLE001
-        return hit.get("team") if isinstance(hit, dict) else None
-    with _logo_lock:                      # same lock family as the other disk caches
-        _player_team_cache[key] = {"team": team, "ts": time.time()}
-        try:
-            PLAYER_TEAM_CACHE_FILE.write_text(json.dumps(_player_team_cache))
-        except OSError:
-            pass
-    return team
-
-
-def _verify_squads(pred: dict):
-    """Drop predicted scorers who have verifiably left the club since the shot
-    data was collected (best-effort; unknown players are kept)."""
-    for side in ("home", "away"):
-        team = pred[side]
-        reg = store.registry.get(team["id"], {})
-        if reg.get("scope") != "club":
-            continue
-        lst = pred["likely_scorers"].get(team["name"])
-        if not lst:
-            continue
-        tsdb_name = _tsdb_team(team["id"]).get("tsdb_name")
-        if not tsdb_name:
-            continue
-        kept = []
-        for s in lst:
-            current = _player_current_team(s["player"])
-            if current and norm_key(current) != norm_key(tsdb_name):
-                continue  # verifiably at a different club now
-            kept.append(s)
-        pred["likely_scorers"][team["name"]] = kept
 
 
 KEY_FILE = ROOT / "data" / "oddsapi_key.txt"
@@ -1016,7 +817,7 @@ KEY_FILE = ROOT / "data" / "oddsapi_key.txt"
 def _resolve_key(key: str = "") -> str:
     if key.strip():
         return key.strip()
-    env = os.environ.get("ODDS_API_KEY", "").strip()   # cloud deployments (HF Space secret)
+    env = os.environ.get("ODDS_API_KEY", "").strip()   # cloud deployments
     if env:
         return env
     if KEY_FILE.exists():
@@ -1063,34 +864,22 @@ def fpl_entry(entry_id: int):
 def meta():
     _require_store()
     m = store.matches
+    y = season_start(m.date.max())
     return {
         "matches": int(len(m)),
         "teams": int(len(store.registry)),
         "leagues": int(m.league.nunique()),
         "data_from": str(m.date.min().date()),
         "data_to": str(m.date.max().date()),
+        "season": f"{y}-{(y + 1) % 100:02d}",
         "xg_data_to": store.xg_data_to,
-        "fantasy_eval": {
-            "pairs": 734,
-            "xg_only": 0.384, "record_only": 0.525, "blended": 0.543,
-            "note": "Rank correlation with what players actually scored the FOLLOWING "
-                    "season, measured on 734 real season-to-season pairs. Projecting from "
-                    "shot quality alone ranks players at 0.38; a player's own scoring "
-                    "record alone at 0.53; the shipped blend of both at 0.54.",
-        },
-        "blend": {
-            "market_weight": 0.75,
-            "note": "Validated on 4,227 unseen matches: accuracy improves monotonically toward "
-                    "the market (optimum 1.0), but 0.75 costs only +0.0008 Brier, within noise. "
-                    "A 25% model share is the most the data defends.",
-        },
+        "fantasy_eval": _fpl.FANTASY_EVAL,     # measured figures live next to the code that made them
         "live_eval": ({**store.live_eval,
-                       "note": "Rolling window check of the Elo-driven core — the component "
-                               "that decides match winners — against actual results and the "
+                       "note": "Rolling window check of the Elo-driven core (the component "
+                               "that decides match winners) against actual results and the "
                                "books' closing odds. The full blend layers xG on top for "
                                "totals and scorelines."}
                       if store.live_eval else None),
-        "context_scales": {k: v for k, v in store.context_scales.items()},
         "refresh": {
             "auto": f"every {REFRESH_HOURS} hours",
             "last": refresher_state["last_refresh"],
@@ -1119,7 +908,7 @@ _usage_dirty = 0
 # `usage_stats()` SQL function; if Supabase is unconfigured or down, it serves
 # the local on-disk aggregates instead.
 
-from .fpl import _sb_conf, _sb_h  # noqa: E402 — one Supabase config, shared with fpl_state
+from .fpl import _sb_conf, _sb_h  # noqa: E402 (one Supabase config, shared with fpl_state)
 SB_URL, SB_KEY = _sb_conf() or ("", "")
 _sb_queue: list[dict] = []
 _sb_lock = threading.Lock()
@@ -1166,7 +955,7 @@ def _sb_flusher() -> None:
                                   headers=_sb_headers(), timeout=10)
             if r.status_code >= 500:          # transient server-side: retry once
                 raise RuntimeError(f"supabase {r.status_code}")
-        except Exception:  # noqa: BLE001 — re-queue once so a blip loses nothing
+        except Exception:  # noqa: BLE001 (re-queue once so a blip loses nothing)
             with _sb_lock:
                 _sb_queue[:0] = batch[-500:]
 
@@ -1229,6 +1018,15 @@ def _flush_usage() -> None:
         pass
 
 
+def _mark_dirty() -> None:
+    """Call with _usage_lock held: write the file on every 25th change."""
+    global _usage_dirty
+    _usage_dirty += 1
+    if _usage_dirty >= 25:
+        _usage_dirty = 0
+        _flush_usage()
+
+
 @app.middleware("http")
 async def _track_usage(request: Request, call_next):
     if warmup["ready"]:
@@ -1242,7 +1040,6 @@ async def _track_usage(request: Request, call_next):
         path = request.url.path
         if not (path.startswith("/static") or path.startswith("/api/admin")
                 or path in ("/healthz", "/favicon.ico")):
-            global _usage_dirty
             vid = _visitor_id(request)
             ip = _client_ip(request)
             _sb_log({"kind": "request", "path": path[:80], "visitor": vid, "ip": ip})
@@ -1250,13 +1047,14 @@ async def _track_usage(request: Request, call_next):
                 d = _day_bucket(time.strftime("%Y-%m-%d"))
                 d["requests"] += 1
                 d["visitors"][vid] = d["visitors"].get(vid, 0) + 1
-                v = _usage.setdefault("ips", {}).setdefault(vid, {"ip": ip, "n": 0})
+                ips = _usage.setdefault("ips", {})
+                v = ips.setdefault(vid, {"ip": ip, "n": 0})
                 v.update(ip=ip, last=int(time.time()), n=v.get("n", 0) + 1)
-                _usage_dirty += 1
-                if _usage_dirty >= 25:
-                    _usage_dirty = 0
-                    _flush_usage()
-    except Exception:  # noqa: BLE001 — analytics must never break the site
+                if len(ips) > 500:              # keep only the newest 500 visitors
+                    for k in sorted(ips, key=lambda k: ips[k].get("last", 0))[:len(ips) - 500]:
+                        del ips[k]
+                _mark_dirty()
+    except Exception:  # noqa: BLE001 (analytics must never break the site)
         pass
     return response
 
@@ -1276,7 +1074,7 @@ def _log_prediction(request: Request, p: dict, context: str, neutral: bool) -> N
                 "neutral": bool(neutral), "visitor": _visitor_id(request),
                 "ip": _client_ip(request),
             }] + _usage["recent"])[:500]
-            _flush_usage()
+            _mark_dirty()
     except Exception:  # noqa: BLE001
         pass
 
@@ -1287,7 +1085,7 @@ class AdminLogin(BaseModel):
 
 
 # brute-force throttle: after 5 straight failures the login sleeps for 15
-# minutes. Global (there is exactly one admin), in-memory (resets on restart —
+# minutes. Global (there is exactly one admin), in-memory (resets on restart;
 # fine, the free host restarts often and the window only needs to slow a bot).
 _login_guard = {"fails": 0, "until": 0.0}
 
@@ -1367,14 +1165,21 @@ def nba_teams():
         raise HTTPException(503, f"basketball data unavailable: {str(e)[:80]}")
 
 
-@app.get("/api/nba/predict")
-def nba_predict(request: Request, home: str, away: str, neutral: bool = False):
-    if home == away:
-        raise HTTPException(400, "pick two different teams")
+def _nba_call(fn, *args, **kw):
+    """Run a basketball model call; an unknown team id is a 404, like /api/nba/predict."""
     try:
-        p = _nba.predict(home, away, neutral)
+        return fn(*args, **kw)
     except KeyError:
         raise HTTPException(404, "unknown team")
+
+
+@app.get("/api/nba/predict")
+def nba_predict(request: Request, home: str, away: str, neutral: bool = False,
+                date: str | None = None):
+    """date: the fixture's kickoff date (ISO) so rest days are counted to the game, not to today."""
+    if home == away:
+        raise HTTPException(400, "pick two different teams")
+    p = _nba_call(_nba.predict, home, away, neutral, date=date)
     try:
         _sb_log({"kind": "prediction", "path": "/api/nba/predict", "visitor": _visitor_id(request),
                  "ip": _client_ip(request), "home": home, "away": away, "context": "nba",
@@ -1399,22 +1204,36 @@ def nba_bestbets(key: str = ""):
     return _nba.grade_odds(k)
 
 
+@app.get("/api/nba/props")
+def nba_props(home: str, away: str, date: str | None = None):
+    """Model player props (points, rebounds, assists) for a matchup."""
+    if home == away:
+        raise HTTPException(400, "pick two different teams")
+    return _nba_call(_nba.player_props, home, away, date=date)
+
+
+@app.get("/api/nba/props/market")
+def nba_props_market(home: str, away: str, key: str = ""):
+    """The model's props graded against the books' current prop lines."""
+    if home == away:
+        raise HTTPException(400, "pick two different teams")
+    k = _resolve_key(key)
+    if not k:
+        return {"error": "no_key", "detail": "No odds API key configured on this server."}
+    return _nba_call(_nba.grade_props, home, away, k)
+
+
 @app.get("/api/nba/meta")
 def nba_meta():
-    m = _nba.model()
-    return {"games": m["n_games"], "data_from": m["data_from"], "data_to": m["data_to"],
-            "season": m["season"], "eval": m["eval"],
-            "fit": {"points_per_elo": round(m["slope"], 4), "home_court_pts": round(m["slope"] * _nba.HOME_ELO, 1),
-                    "sd_margin": round(m["sd_m"], 1), "sd_total": round(m["sd_t"], 1),
-                    "league_total": round(m["lg_total"], 1)},
-            "note": ("Elo with a margin-of-victory multiplier, re-fitted on every refresh. The "
-                     "slope from rating gap to points and both spreads are measured on the stored "
-                     "games, not assumed. Walk-forward accuracy is on the most recent full season.")}
+    return _nba.meta() | {
+        "note": ("Elo with a margin-of-victory multiplier, re-fitted on every refresh. The "
+                 "slope from rating gap to points and both spreads are measured on the stored "
+                 "games, not assumed. Walk-forward accuracy is on the most recent full season.")}
 
 
 @app.get("/admin")
 def admin_page():
-    return FileResponse(str(ROOT / "frontend" / "admin.html"))
+    return FileResponse(ROOT / "frontend" / "admin.html", headers={"Cache-Control": "no-cache"})
 
 
 app.mount("/static", StaticFiles(directory=ROOT / "frontend"), name="static")
@@ -1429,57 +1248,59 @@ def index():
 
 # ---------- upcoming fixtures (same source as our match history) ----------
 
-_fixtures_cache: dict = {}
+_fixtures_cache: dict[int, tuple[float, list, str]] = {}   # days -> (built_at, fixtures, note)
 _FIXTURES_TTL = 1800          # 30 min
 
-# division codes in rough order of interest
-_DIV_RANK = {"E0": 0, "SP1": 1, "I1": 2, "D1": 3, "F1": 4, "N1": 5, "P1": 6,
-             "B1": 7, "T1": 8, "SC0": 9, "E1": 10}
+try:
+    from zoneinfo import ZoneInfo
+    _UK = ZoneInfo("Europe/London")
+except Exception:  # noqa: BLE001
+    _UK = None
+
+
+def _iso_uk(naive_london: datetime) -> str:
+    if _UK is not None:
+        return naive_london.replace(tzinfo=_UK).isoformat(timespec="minutes")
+    return naive_london.strftime("%Y-%m-%dT%H:%M")
+
+
+def _utc_to_london(naive_utc: datetime) -> datetime:
+    if _UK is not None:
+        return naive_utc.replace(tzinfo=timezone.utc).astimezone(_UK).replace(tzinfo=None)
+    return naive_utc
 
 
 @app.get("/api/fixtures/upcoming")
 def upcoming_fixtures(days: int = 7, limit: int = 40):
-    """Real upcoming matches from football-data.co.uk — the same feed our match
+    """Real upcoming matches from football-data.co.uk, the same feed our match
     history comes from, so every team name maps straight onto the model.
     Kick-offs are ISO-8601 WITH a UTC offset (UK wall time), so clients can show
     the viewer's local time with a plain Date parse; the first 16 characters
-    still read as UK time for older clients that slice the string."""
+    still read as UK time for older clients that slice the string. A match whose
+    kick-off time is not published yet carries the date at 00:00 and
+    time_tbc: true; no time is ever invented."""
     _require_store()
     days = max(1, min(days, 14))
     limit = max(1, min(limit, 60))
-    key = f"up:{days}:{limit}"
-    hit = _fixtures_cache.get(key)
+    hit = _fixtures_cache.get(days)
     if hit and time.time() - hit[0] < _FIXTURES_TTL:
-        from datetime import datetime as _dt, timezone as _tz
-        now_utc = _dt.now(_tz.utc)
-        for f in hit[1]["fixtures"]:         # the in-play flag must not go stale with the cache
-            try:
-                f["kicked_off"] = _dt.fromisoformat(f["kickoff"]) <= now_utc
-            except (TypeError, ValueError):
-                pass
-        return hit[1]
+        _, fixtures, note = hit
+    else:
+        fixtures, note = _build_fixtures(days)
+        if fixtures:   # a total source blackout shouldn't pin an empty rail for the TTL
+            _fixtures_cache[days] = (time.time(), fixtures, note)
+    now_utc = datetime.now(timezone.utc)
+    for f in fixtures:         # the in-play flag must not go stale with the cache
+        if f["time_tbc"]:
+            continue
+        try:
+            f["kicked_off"] = datetime.fromisoformat(f["kickoff"]) <= now_utc
+        except (TypeError, ValueError):
+            pass
+    return {"fixtures": fixtures[:limit], "count": len(fixtures), "note": note}
 
-    import csv
-    import io as _io
-    from datetime import datetime, timedelta
 
-    try:
-        from zoneinfo import ZoneInfo
-        _uk = ZoneInfo("Europe/London")
-    except Exception:  # noqa: BLE001
-        _uk = None
-
-    def _iso_uk(naive_london: datetime) -> str:
-        if _uk is not None:
-            return naive_london.replace(tzinfo=_uk).isoformat(timespec="minutes")
-        return naive_london.strftime("%Y-%m-%dT%H:%M")
-
-    def _utc_to_london(naive_utc: datetime) -> datetime:
-        if _uk is not None:
-            from datetime import timezone as _tz
-            return naive_utc.replace(tzinfo=_tz.utc).astimezone(_uk).replace(tzinfo=None)
-        return naive_utc
-
+def _build_fixtures(days: int) -> tuple[list[dict], str]:
     try:
         r = requests.get("https://www.football-data.co.uk/fixtures.csv",
                          headers=UA, timeout=12)
@@ -1490,24 +1311,22 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
         # quiet week and let the FPL + league-schedule fallbacks fill in
         text = ""
 
-    by_name = {norm_key(reg["name"]): tid for tid, reg in store.registry.items()
-               if reg["scope"] == "club"}
-    from .data_store import LEAGUE_NAMES
-
-    now = (datetime.now(_uk).replace(tzinfo=None) if _uk is not None
-           else datetime.utcnow())
+    by_name = {reg["nk"]: tid for tid, reg in store.registry.items() if reg["scope"] == "club"}
+    now = (datetime.now(_UK).replace(tzinfo=None) if _UK is not None
+           else datetime.now(timezone.utc).replace(tzinfo=None))
     horizon = now + timedelta(days=days)
-    out = []
-    seen: set[tuple] = set()   # (home_id, away_id): a rescheduled match shows once
+    out: list[dict] = []
+    by_pair: dict[tuple, dict] = {}   # (home_id, away_id): a rescheduled match shows once
 
-    by_pair: dict[tuple, dict] = {}
-
-    def _push(hid, aid, ko_london, league, country, odds, rank):
-        if (hid, aid) in seen:
-            if odds and not by_pair[(hid, aid)].get("odds"):
-                by_pair[(hid, aid)]["odds"] = odds     # a later source adds prices only
+    def _push(hid, aid, ko_london, league, country, odds, rank, time_tbc=False):
+        cur = by_pair.get((hid, aid))
+        if cur is not None:
+            if odds and not cur.get("odds"):
+                cur["odds"] = odds                       # a later source adds prices only
+            if cur["time_tbc"] and not time_tbc:         # ...or the kick-off time
+                cur.update(kickoff=_iso_uk(ko_london), time_tbc=False,
+                           kicked_off=ko_london <= now)
             return
-        seen.add((hid, aid))
         by_pair[(hid, aid)] = {
             "home_id": hid, "away_id": aid,
             "home": store.registry[hid]["name"], "away": store.registry[aid]["name"],
@@ -1515,35 +1334,22 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
             "away_elo": store.registry[aid]["elo_global"],
             "league": league, "country": country,
             "kickoff": _iso_uk(ko_london),
-            "kicked_off": ko_london <= now,
+            "time_tbc": time_tbc,
+            "kicked_off": (not time_tbc) and ko_london <= now,
             "odds": odds, "rank": rank,
         }
         out.append(by_pair[(hid, aid)])
 
-
     # ---- live layer: the odds service's events listing. Bookmaker-grade,
-    # continuously updated, and its events endpoint costs ZERO quota credits —
+    # continuously updated, and its events endpoint costs ZERO quota credits,
     # so the rail is genuinely live even when the historical feed is quiet/down.
-    _ODDS_FIXTURE_SPORTS = [
-        ("soccer_epl", "E0", "Premier League", "England", 1),
-        ("soccer_efl_champ", "E1", "Championship", "England", 6),
-        ("soccer_spain_la_liga", "SP1", "La Liga", "Spain", 2),
-        ("soccer_italy_serie_a", "I1", "Serie A", "Italy", 3),
-        ("soccer_germany_bundesliga", "D1", "Bundesliga", "Germany", 4),
-        ("soccer_france_ligue_one", "F1", "Ligue 1", "France", 5),
-        ("soccer_netherlands_eredivisie", "N1", "Eredivisie", "Netherlands", 7),
-        ("soccer_portugal_primeira_liga", "P1", "Primeira Liga", "Portugal", 8),
-        ("soccer_turkey_super_league", "T1", "Super Lig", "Turkey", 9),
-        ("soccer_usa_mls", "USA", "MLS", "USA", 10),
-        ("soccer_brazil_campeonato", "BRA", "Serie A (Brazil)", "Brazil", 11),
-        ("soccer_mexico_ligamx", "MEX", "Liga MX", "Mexico", 12),
-    ]
     live_n = 0
     odds_key = _resolve_key("")
     if odds_key:
-        from .bestbets import resolve_team
+        from .bestbets import LEAGUE_TO_SPORT, resolve_team
         from .bestbets import BASE as ODDS_BASE
-        for sport, code, lgname, country, rank in _ODDS_FIXTURE_SPORTS:
+        # the single league table: code -> (sport_key, league_name, country, rank)
+        for code, (sport, lgname, country, rank) in LEAGUE_TO_SPORT.items():
             try:
                 r2 = requests.get(f"{ODDS_BASE}/sports/{sport}/events",
                                   params={"apiKey": odds_key}, timeout=8)
@@ -1567,36 +1373,38 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     if in_league:
                         _push(hid, aid, kod, lgname, country, None, rank)
                     else:
-                        _push(hid, aid, kod, "Cup tie", country, None, 15)
+                        _push(hid, aid, kod, "Other competition", country, None, 15)
                     live_n += len(out) - before
             except Exception:  # noqa: BLE001
                 continue
 
-    def _schedule_rows():
-      for row in csv.DictReader(_io.StringIO(text)):
-          div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
-          if not div or not hn or not an:
-              continue
-          try:
-              ko = datetime.strptime(f"{row['Date']} {row.get('Time') or '15:00'}",
-                                     "%d/%m/%Y %H:%M")
-          except (ValueError, KeyError):
-              continue
-          if ko < now - timedelta(hours=2) or ko > horizon:
-              continue
-          hid, aid = by_name.get(norm_key(hn)), by_name.get(norm_key(an))
-          if not hid or not aid:
-              continue
-          league, country = LEAGUE_NAMES.get(div, (div, ""))
-          try:
-              odds = {"home": float(row["AvgH"]), "draw": float(row["AvgD"]),
-                      "away": float(row["AvgA"])}
-          except (TypeError, ValueError, KeyError):
-              odds = None
-          _push(hid, aid, ko, league, country, odds, _DIV_RANK.get(div, 20))
-
+    # ---- the schedule file: confirmed fixtures, with the market's average odds
     n_before_schedule = len(out)
-    _schedule_rows()
+    for row in csv.DictReader(io.StringIO(text)):
+        div, hn, an = row.get("Div"), row.get("HomeTeam"), row.get("AwayTeam")
+        if not div or not hn or not an:
+            continue
+        hhmm = (row.get("Time") or "").strip()
+        tbc = not hhmm
+        try:
+            ko = datetime.strptime(f"{row['Date']} {hhmm or '00:00'}", "%d/%m/%Y %H:%M")
+        except (ValueError, KeyError):
+            continue
+        # a match with no published time stays listed for the whole of its day
+        cutoff = now.replace(hour=0, minute=0, second=0, microsecond=0) if tbc \
+            else now - timedelta(hours=2)
+        if ko < cutoff or ko > horizon:
+            continue
+        hid, aid = by_name.get(norm_key(hn)), by_name.get(norm_key(an))
+        if not hid or not aid:
+            continue
+        league, country = LEAGUE_NAMES.get(div, (div, ""))
+        try:
+            odds = {"home": float(row["AvgH"]), "draw": float(row["AvgD"]),
+                    "away": float(row["AvgA"])}
+        except (TypeError, ValueError, KeyError):
+            odds = None
+        _push(hid, aid, ko, league, country, odds, DIV_RANK.get(div, 20), time_tbc=tbc)
     primary_n = len(out) - n_before_schedule
 
     have_pl = any(f["league"] == "Premier League" for f in out)
@@ -1618,7 +1426,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                 if not ko:
                     continue
                 kod = _utc_to_london(datetime.strptime(ko, "%Y-%m-%dT%H:%M:%SZ"))
-                if kod > now + timedelta(days=max(days, 12)):
+                if kod > horizon:
                     continue
                 th, ta = tmap.get(f["team_h"]), tmap.get(f["team_a"])
                 if not th or not ta or not th["registry_id"] or not ta["registry_id"]:
@@ -1629,7 +1437,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
             pass
     if len(out) < 5:
         # other big leagues: the free schedule source lists the next confirmed
-        # match per league — thin, but keeps the rail worldwide between rounds
+        # match per league: thin, but keeps the rail worldwide between rounds
         _TSDB_LEAGUES = [("4335", "La Liga", "Spain"), ("4332", "Serie A", "Italy"),
                          ("4331", "Bundesliga", "Germany"), ("4334", "Ligue 1", "France"),
                          ("4337", "Eredivisie", "Netherlands"),
@@ -1656,7 +1464,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                     if not ts:
                         continue
                     kod = _utc_to_london(datetime.strptime(ts[:16], "%Y-%m-%dT%H:%M"))
-                    if kod < now - timedelta(hours=2) or kod > now + timedelta(days=max(days, 12)):
+                    if kod < now - timedelta(hours=2) or kod > horizon:
                         continue
                     hid = _map_club(ev.get("strHomeTeam") or "")
                     aid = _map_club(ev.get("strAwayTeam") or "")
@@ -1667,8 +1475,7 @@ def upcoming_fixtures(days: int = 7, limit: int = 40):
                 continue
     if len(out) > primary_n + live_n:
         note += " Confirmed league schedules fill the remaining gaps."
+    if any(f["time_tbc"] for f in out):
+        note += " Matches marked TBC have no published kick-off time yet."
     out.sort(key=lambda f: (f["kickoff"], f["rank"]))   # soonest first, all leagues mixed
-    payload = {"fixtures": out[:limit], "count": len(out), "note": note}
-    if out:   # a total source blackout shouldn't pin an empty rail for the TTL
-        _fixtures_cache[key] = (time.time(), payload)
-    return payload
+    return out, note

@@ -16,13 +16,11 @@ import math
 
 import numpy as np
 
-from .data_store import Store
+from .data_store import ELO_HOME_ADV_CLUB, ELO_HOME_ADV_INTL, Store
 
 MAX_GOALS = 10
 _FACT = np.array([math.factorial(i) for i in range(MAX_GOALS + 1)], dtype=float)
 DC_RHO = -0.10          # Dixon-Coles low-score correlation
-ELO_HOME_ADV_CLUB = 60.0   # matches the HA used when pre_elo_diff was built
-ELO_HOME_ADV_INTL = 55.0
 
 
 def dc_tau(x: int, y: int, lh: float, la: float, rho: float) -> float:
@@ -64,14 +62,14 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
     # --- estimate 1: attack/defence strengths against blended league baseline
     # Where shot-level xG strengths exist (top-5 leagues + RFPL) they are blended
     # with goals-based strengths: xG is the better signal of underlying quality,
-    # goals data is fresher — the mix captures both.
+    # goals data is fresher, and the mix captures both.
     def strength(team: str, goals_map: dict, xg_map: dict) -> float:
         g = goals_map.get(team, 1.0)
         x = xg_map.get(team)
         return 0.55 * x + 0.45 * g if x is not None else g
 
-    ls_h = store.league_stats.get(rh["league"], {"avg_hg": 1.5, "avg_ag": 1.15})
-    ls_a = store.league_stats.get(ra["league"], {"avg_hg": 1.5, "avg_ag": 1.15})
+    ls_h = store.league_stats[rh["league"]]
+    ls_a = store.league_stats[ra["league"]]
     base_hg = (ls_h["avg_hg"] + ls_a["avg_hg"]) / 2
     base_ag = (ls_h["avg_ag"] + ls_a["avg_ag"]) / 2
     if neutral:
@@ -83,6 +81,8 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
     dc_lh = base_hg * att_h * def_a
     dc_la = base_ag * att_a * def_h
     uses_xg = home in store.xg_attack or away in store.xg_attack
+    # teams with no result inside the strengths window fall back to 1.0 above
+    unrated = [r["name"] for t, r in ((home, rh), (away, ra)) if t not in store.attack]
 
     # --- estimate 2: Elo difference -> goals (global, cross-league comparable)
     fit = store.goal_fit_intl if intl else store.goal_fit_club
@@ -108,7 +108,7 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
     la = dc_la ** (1 - w) * elo_la ** w
     # match-context scoring environment (fitted from history where possible)
     ctx_info = None
-    valid = INTL_CONTEXTS if (rh["scope"] == "intl" and ra["scope"] == "intl") else CLUB_CONTEXTS
+    valid = INTL_CONTEXTS if intl else CLUB_CONTEXTS
     if context in valid:
         cs = store.context_scales.get(context)
         if cs:
@@ -125,7 +125,7 @@ def expected_goals(store: Store, home: str, away: str, neutral: bool,
     lh = float(np.clip(lh, 0.15, 4.5))
     la = float(np.clip(la, 0.15, 4.5))
     return {"lambda_home": lh, "lambda_away": la, "elo_diff": round(eh - ea, 1),
-            "context": ctx_info,
+            "context": ctx_info, "unrated": unrated,
             "same_league": same_league, "scope_mix": scope_mix, "uses_xg": uses_xg,
             "components": {"dc": [round(dc_lh, 2), round(dc_la, 2)],
                            "elo": [round(elo_lh, 2), round(elo_la, 2)],
@@ -150,6 +150,8 @@ def markets_from_matrix(mat: np.ndarray) -> dict:
                            "fair_over": fair(p), "fair_under": fair(1 - p)}
 
     btts = float(mat[1:, 1:].sum())
+    dc = {"1X": p_home + p_draw, "X2": p_away + p_draw, "12": p_home + p_away}
+    cs = {"home": float(mat[:, 0].sum()), "away": float(mat[0, :].sum())}
     flat = [(int(i), int(j), float(mat[i, j]))
             for i in idx for j in idx if mat[i, j] > 0.001]
     flat.sort(key=lambda t: -t[2])
@@ -177,10 +179,8 @@ def markets_from_matrix(mat: np.ndarray) -> dict:
             "home": round(p_home, 4), "draw": round(p_draw, 4), "away": round(p_away, 4),
             "fair_odds": {"home": fair(p_home), "draw": fair(p_draw), "away": fair(p_away)},
         },
-        "double_chance": {
-            "1X": round(p_home + p_draw, 4), "X2": round(p_away + p_draw, 4),
-            "12": round(p_home + p_away, 4),
-        },
+        "double_chance": {**{k: round(p, 4) for k, p in dc.items()},
+                          "fair_odds": {k: fair(p) for k, p in dc.items()}},
         "draw_no_bet": {
             "home": round(p_home / (p_home + p_away), 4),
             "away": round(p_away / (p_home + p_away), 4),
@@ -188,59 +188,82 @@ def markets_from_matrix(mat: np.ndarray) -> dict:
         "totals": over,
         "btts": {"yes": round(btts, 4), "no": round(1 - btts, 4),
                  "fair_yes": fair(btts), "fair_no": fair(1 - btts)},
-        "clean_sheet": {"home": round(float(mat[:, 0].sum()), 4),
-                        "away": round(float(mat[0, :].sum()), 4)},
+        "clean_sheet": {**{k: round(p, 4) for k, p in cs.items()},
+                        "fair_odds": {k: fair(p) for k, p in cs.items()}},
         "handicaps": hcap,
         "margins": margins,
         "correct_scores": top_scores,
     }
 
 
-def likely_scorers(store: Store, team_name: str, team_lambda: float) -> list[dict]:
-    """International teams: allocate expected goals by recency-weighted goal share."""
-    sg = store.scorer_goals
-    rows = sg[sg.team == team_name].sort_values("wgoals", ascending=False)
-    if rows.empty:
-        return []
-    total = rows.wgoals.sum()
+# ---------- player shares: one computation for scorers, absences and parlay legs ----------
+# Some goals go to players outside the tracked list, so a list's shares are thinned.
+CLUB_SHARE_SCALE = 0.92     # shot-data list (top 10 by xG share)
+INTL_SHARE_SCALE = 0.85     # recent-scorer list for national teams
+
+
+def _team_shares(store: Store, tid: str, reg: dict) -> list[tuple[str, float]]:
+    """Each tracked player's share of his team's goals, largest first: xG share
+    where shot data exists, recency-weighted goal share for national teams."""
+    rows = store.player_rates.get(tid)
+    if rows:
+        return [(r["player"], r["xg_share"] * CLUB_SHARE_SCALE) for r in rows]
+    if reg["scope"] == "intl":
+        sg = store.scorer_goals
+        t = sg[sg.team == reg["name"]].sort_values("wgoals", ascending=False)
+        total = float(t.wgoals.sum())
+        if total > 0:
+            return [(p, float(g) / total * INTL_SHARE_SCALE) for p, g in zip(t.scorer, t.wgoals)]
+    return []
+
+
+def _player_share(store: Store, tid: str, reg: dict, player: str) -> float | None:
+    """A player's share of his team's goals, or None if unknown."""
+    return next((s for p, s in _team_shares(store, tid, reg) if p == player), None)
+
+
+def likely_scorers(store: Store, tid: str, reg: dict, team_lambda: float) -> list[dict]:
+    """Allocate the team's expected goals across its tracked players."""
     out = []
-    for _, r in rows.head(8).iterrows():
-        share = r.wgoals / total
-        share *= 0.85  # some goals go to players outside the recent-scorer list
+    for player, share in _team_shares(store, tid, reg)[:8]:
         p = 1 - math.exp(-team_lambda * share)
-        out.append({"player": r.scorer, "prob_to_score": round(p, 3), "fair_odds": fair(p)})
+        out.append({"player": player, "prob_to_score": round(p, 3), "fair_odds": fair(p)})
     return out
 
 
-def likely_scorers_club(store: Store, tid: str, team_lambda: float) -> list[dict]:
-    """Clubs with shot-level data: allocate expected goals by each player's
-    recency-weighted share of the team's xG."""
+def likely_assisters(store: Store, tid: str, team_lambda: float) -> list[dict]:
+    """Clubs with shot data: a player's expected assists are his share of the
+    team's xA times the team's expected goals times the league-wide measured
+    assists per goal (xA per xG). Empty where the data is missing."""
+    shares = store.player_xa.get(tid)
+    if not shares or not store.xa_per_xg:
+        return []
     out = []
-    for r in store.player_rates.get(tid, [])[:8]:
-        p = 1 - math.exp(-team_lambda * r["xg_share"] * 0.92)
-        out.append({"player": r["player"], "prob_to_score": round(p, 3), "fair_odds": fair(p)})
+    for player, share in sorted(shares.items(), key=lambda kv: -kv[1])[:5]:
+        p = 1 - math.exp(-share * team_lambda * store.xa_per_xg)
+        out.append({"player": player, "prob_to_assist": round(p, 3), "fair_odds": fair(p)})
     return out
+
+
+ABSENCE_LOSS = 0.65      # assumed share of a missing player's goals the team loses
 
 
 def _absence_factor(store: Store, tid: str, out_players: list[str]) -> tuple[float, list]:
     """Reduction in team expected goals when named players are unavailable.
-    A missing player removes ~65% of his xG share (his replacement and shot
-    redistribution recover the rest) — in line with published squad-strength studies.
-    Clubs use shot-based xG shares; national teams fall back to weighted goal
-    shares so marking an international's star out is not a silent no-op."""
+    A missing player is assumed to take ABSENCE_LOSS of his goal share with him
+    (his replacement and shot redistribution recover the rest). That loss rate
+    is an assumption, not a value fitted on this data. Clubs use shot-based xG
+    shares; national teams fall back to weighted goal shares so marking an
+    international's star out is not a silent no-op."""
     reg = store.registry.get(tid, {})
     rates = {r["player"]: r["xg_share"] for r in store.player_rates.get(tid, [])}
     factor, applied = 1.0, []
     for p in out_players:
         share = rates.get(p)
         if share is None and reg.get("scope") == "intl":
-            sg = store.scorer_goals
-            rows = sg[sg.team == reg.get("name", "")]
-            if len(rows) and p in set(rows.scorer):
-                total = float(rows.wgoals.sum()) or 1.0
-                share = float(rows[rows.scorer == p].wgoals.iloc[0]) / total * 0.85
+            share = _player_share(store, tid, reg, p)
         if share:
-            factor *= (1.0 - 0.65 * share)
+            factor *= (1.0 - ABSENCE_LOSS * share)
             applied.append({"player": p, "xg_share": round(share, 3)})
     # even a decimated side keeps ~60% of its attacking output (replacements
     # play); this floor also bounds the damage of any false-positive news hit
@@ -248,84 +271,73 @@ def _absence_factor(store: Store, tid: str, out_players: list[str]) -> tuple[flo
 
 
 # --- same-game parlay legs: each is a boolean condition over (home goals, away goals)
-FIRST_HALF_GOAL_SHARE = 0.456   # empirical share of goals scored before HT
+FIRST_HALF_GOAL_SHARE = 0.456   # fallback only: the store measures its own share
 N_SIMS = 150_000
+MIN_PARLAY_PROB = 0.015         # suggestions below this joint probability are dropped
 
 
-def _player_share(store: Store, tid: str, reg: dict, player: str) -> float | None:
-    """A player's share of his team's goals, or None if unknown."""
-    for r in store.player_rates.get(tid, []):
-        if r["player"] == player:
-            return r["xg_share"] * 0.92
-    if reg["scope"] == "intl":
-        sg = store.scorer_goals
-        rows = sg[sg.team == reg["name"]]
-        if not rows.empty and player in set(rows.scorer):
-            total = rows.wgoals.sum()
-            return float(rows[rows.scorer == player].wgoals.iloc[0]) / total * 0.85
-    return None
+class _MatchSim:
+    """Monte Carlo scoreline draws for one fixture, taken once from the calibrated
+    Dixon-Coles matrix (exact). Half-time splits and scorer legs are layered on
+    lazily with documented approximations (goals split by the measured
+    first-half share, player goals thinned from team goals by share). Every
+    parlay for the fixture is evaluated on the same draws."""
 
+    def __init__(self, store: Store, home: str, away: str, neutral: bool = False,
+                 context: str = "none", out_home: list[str] | None = None,
+                 out_away: list[str] | None = None, n: int = N_SIMS):
+        self.store, self.n = store, n
+        self.rng = np.random.default_rng(20260715)
+        self.ids = {"home": home, "away": away}
+        self.regs = {"home": store.registry[home], "away": store.registry[away]}
+        self.names = {s: r["name"] for s, r in self.regs.items()}
+        eg = expected_goals(store, home, away, neutral, context)
+        lh, la = eg["lambda_home"], eg["lambda_away"]
+        # the same absentees that shape the main prediction shape every parlay leg
+        if out_home:
+            lh *= _absence_factor(store, home, out_home)[0]
+        if out_away:
+            la *= _absence_factor(store, away, out_away)[0]
+        self.lh, self.la = lh, la
+        self.outs = set((out_home or []) + (out_away or []))
+        mat = score_matrix(lh, la)
+        flat = mat.ravel()
+        cells = self.rng.choice(len(flat), size=n, p=flat / flat.sum())
+        self.hg = cells // (MAX_GOALS + 1)
+        self.ag = cells % (MAX_GOALS + 1)
+        self.layers: dict[str, np.ndarray] = {}
 
-def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
-                 neutral: bool = False, context: str = "none", n: int = N_SIMS,
-                 out_home: list[str] | None = None,
-                 out_away: list[str] | None = None) -> dict:
-    """Same-game parlay joint probability via Monte Carlo over the score matrix.
+    def _half_time(self) -> tuple[np.ndarray, np.ndarray]:
+        if "h1_h" not in self.layers:
+            share = self.store.first_half_share or FIRST_HALF_GOAL_SHARE
+            self.layers["h1_h"] = self.rng.binomial(self.hg, share)
+            self.layers["h1_a"] = self.rng.binomial(self.ag, share)
+        return self.layers["h1_h"], self.layers["h1_a"]
 
-    Scorelines are drawn from the calibrated Dixon-Coles matrix (exact);
-    half-time splits and scorer legs are layered on with documented
-    approximations (goals split by the empirical first-half share, player
-    goals thinned from team goals by xG share).
-    """
-    rng = np.random.default_rng(20260715)
-    rh, ra = store.registry[home], store.registry[away]
-    eg = expected_goals(store, home, away, neutral, context)
-    lh, la = eg["lambda_home"], eg["lambda_away"]
-    # the same absentees that shape the main prediction shape every parlay leg
-    if out_home:
-        lh *= _absence_factor(store, home, out_home)[0]
-    if out_away:
-        la *= _absence_factor(store, away, out_away)[0]
-    _outs = set((out_home or []) + (out_away or []))
-    mat = score_matrix(lh, la)
-    flat = mat.ravel()
-    cells = rng.choice(len(flat), size=n, p=flat / flat.sum())
-    hg = cells // (MAX_GOALS + 1)
-    ag = cells % (MAX_GOALS + 1)
+    def _first_goal(self) -> tuple[np.ndarray, np.ndarray]:
+        if "first_home" not in self.layers:
+            tot = self.hg + self.ag
+            p_home_first = np.where(tot > 0, self.hg / np.maximum(tot, 1), 0.0)
+            r = self.rng.random(self.n)
+            self.layers["first_home"] = (tot > 0) & (r < p_home_first)
+            self.layers["first_away"] = (tot > 0) & ~self.layers["first_home"]
+        return self.layers["first_home"], self.layers["first_away"]
 
-    sims: dict[str, np.ndarray] = {"hg": hg, "ag": ag}
-
-    def need(kind: str):
-        """Lazily simulate optional layers only when a leg needs them."""
-        if kind in sims:
-            return
-        if kind == "h1":
-            sims["h1_h"] = rng.binomial(hg, FIRST_HALF_GOAL_SHARE)
-            sims["h1_a"] = rng.binomial(ag, FIRST_HALF_GOAL_SHARE)
-            sims["h1"] = True
-        elif kind == "first":
-            tot = hg + ag
-            p_home_first = np.where(tot > 0, hg / np.maximum(tot, 1), 0.0)
-            r = rng.random(n)
-            sims["first_home"] = (tot > 0) & (r < p_home_first)
-            sims["first_away"] = (tot > 0) & ~sims["first_home"]
-            sims["first"] = True
-
-    def player_goals(side: str, player: str) -> np.ndarray:
+    def _player_goals(self, side: str, player: str) -> np.ndarray:
         key = f"pg:{side}:{player}"
-        if key not in sims:
-            if player in _outs:
+        if key not in self.layers:
+            if player in self.outs:
                 raise ValueError(f"{player} is flagged out of this match")
-            tid, reg = (home, rh) if side == "home" else (away, ra)
-            sh = _player_share(store, tid, reg, player)
+            sh = _player_share(self.store, self.ids[side], self.regs[side], player)
             if sh is None:
                 raise ValueError(f"no data for player: {player}")
-            sims[key] = rng.binomial(hg if side == "home" else ag, min(sh, 0.95))
-        return sims[key]
+            self.layers[key] = self.rng.binomial(self.hg if side == "home" else self.ag,
+                                                 min(sh, 0.95))
+        return self.layers[key]
 
-    def eval_leg(leg: str) -> tuple[str, np.ndarray]:
-        h, a, tot = hg, ag, hg + ag
-        nm = {"home": rh["name"], "away": ra["name"]}
+    def leg(self, leg: str) -> tuple[str, np.ndarray]:
+        h, a, tot = self.hg, self.ag, self.hg + self.ag
+        nm = self.names
         simple = {
             "home": (f"{nm['home']} win", h > a), "draw": ("Draw", h == a),
             "away": (f"{nm['away']} win", h < a),
@@ -336,15 +348,12 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
             "odd": ("Odd total goals", tot % 2 == 1), "even": ("Even total goals", tot % 2 == 0),
             "home_cs": (f"{nm['home']} clean sheet", a == 0),
             "away_cs": (f"{nm['away']} clean sheet", h == 0),
-            "both_halves_goal": ("Goal in each half", None),  # filled below
         }
         if leg in simple:
-            if leg == "both_halves_goal":
-                need("h1")
-                m = (sims["h1_h"] + sims["h1_a"] > 0) & \
-                    ((h - sims["h1_h"]) + (a - sims["h1_a"]) > 0)
-                return "Goal in each half", m
             return simple[leg]
+        if leg == "both_halves_goal":
+            h1h, h1a = self._half_time()
+            return "Goal in each half", (h1h + h1a > 0) & ((h - h1h) + (a - h1a) > 0)
         p = leg.split(":")
         if p[0] in ("o", "u"):                      # o:2.5 / u:3.5 total goals
             line = float(p[1])
@@ -363,71 +372,61 @@ def simulate_sgp(store: Store, home: str, away: str, legs: list[str],
             d = h - a if side == "home" else a - h
             return f"{nm[side]} win by {k}+", d >= k
         if p[0] == "ht":                            # ht:home half-time result
-            need("h1")
-            hh, ha = sims["h1_h"], sims["h1_a"]
+            hh, ha = self._half_time()
             m = {"home": hh > ha, "draw": hh == ha, "away": hh < ha}[p[1]]
             lbl = {"home": nm["home"], "draw": "Draw", "away": nm["away"]}[p[1]]
             return f"HT: {lbl}", m
         if p[0] == "first":                         # first:home / first:away / first:none
-            need("first")
             if p[1] == "none":
-                return "No goals", hg + ag == 0
-            return (f"{nm[p[1]]} scores first",
-                    sims["first_home"] if p[1] == "home" else sims["first_away"])
+                return "No goals", tot == 0
+            first_home, first_away = self._first_goal()
+            return (f"{nm[p[1]]} scores first", first_home if p[1] == "home" else first_away)
         if p[0] == "scorer":                        # scorer:home:Mohamed Salah
             side, player = p[1], ":".join(p[2:])
-            return f"{player} to score", player_goals(side, player) > 0
+            return f"{player} to score", self._player_goals(side, player) > 0
         raise ValueError(f"unknown leg: {leg}")
 
-    out_legs = []
-    mask = np.ones(n, dtype=bool)
-    naive = 1.0
-    for leg in legs:
-        label, m = eval_leg(leg)
-        pm = float(m.mean())
-        naive *= pm
-        out_legs.append({"leg": leg, "label": label, "marginal_prob": round(pm, 4)})
-        mask &= m
-    joint = float(mask.mean())
-    notes = ["Simulated over 150,000 match runs (sampling error ≈ ±0.3%)."]
-    return {
-        "legs": out_legs,
-        "joint_prob": round(joint, 4),
-        "fair_odds": fair(joint),
-        "naive_prob": round(naive, 4),
-        "naive_odds": fair(naive),
-        "correlation_boost": round(joint / naive, 3) if naive > 1e-9 else None,
-        "expected_goals": {"home": round(lh, 2), "away": round(la, 2)},
-        "notes": notes,
-    }
+    def parlay(self, legs: list[str]) -> dict:
+        """Joint probability of all legs on the shared draws, next to the naive
+        product of the marginals, so the correlation between legs is visible."""
+        out_legs = []
+        mask = np.ones(self.n, dtype=bool)
+        naive = 1.0
+        for leg in legs:
+            label, m = self.leg(leg)
+            pm = float(m.mean())
+            naive *= pm
+            out_legs.append({"leg": leg, "label": label, "marginal_prob": round(pm, 4)})
+            mask &= m
+        joint = float(mask.mean())
+        # worst-case binomial sampling error at two standard errors
+        err = 2 * math.sqrt(0.25 / self.n)
+        return {
+            "legs": out_legs,
+            "joint_prob": round(joint, 4),
+            "fair_odds": fair(joint),
+            "naive_prob": round(naive, 4),
+            "naive_odds": fair(naive),
+            "correlation_boost": round(joint / naive, 3) if naive > 1e-9 else None,
+            "expected_goals": {"home": round(self.lh, 2), "away": round(self.la, 2)},
+            "notes": [f"Simulated over {self.n:,} match runs (sampling error within about {err:.1%})."],
+        }
 
 
 def suggest_parlays(store: Store, home: str, away: str,
                     neutral: bool = False, context: str = "none",
                     out_home: list[str] | None = None,
-                    out_away: list[str] | None = None) -> list[dict]:
+                    out_away: list[str] | None = None) -> dict:
     """Auto-build same-game parlay candidates around the model's read of the
     match. Each comes with true fair odds and the minimum book quote worth
     taking (fair +5% safety margin for model uncertainty). Players flagged
     out never headline a suggestion, and every leg is priced with the same
     absentee-reduced goal expectations as the main prediction."""
-    eg = expected_goals(store, home, away, neutral, context)
-    favside = "home" if eg["lambda_home"] >= eg["lambda_away"] else "away"
-    tid = home if favside == "home" else away
-    reg = store.registry[tid]
+    sim = _MatchSim(store, home, away, neutral, context, out_home, out_away)
+    favside = "home" if sim.lh >= sim.la else "away"
+    tid, reg = sim.ids[favside], sim.regs[favside]
     outs_fav = set((out_home or []) if favside == "home" else (out_away or []))
-    top = None
-    for r in store.player_rates.get(tid, []):
-        if r["player"] not in outs_fav:
-            top = r["player"]
-            break
-    if top is None and reg["scope"] == "intl":
-        rows = store.scorer_goals[store.scorer_goals.team == reg["name"]] \
-            .sort_values("wgoals", ascending=False)
-        for _, row in rows.iterrows():
-            if row.scorer not in outs_fav:
-                top = row.scorer
-                break
+    top = next((p for p, _ in _team_shares(store, tid, reg) if p not in outs_fav), None)
 
     T = [
         ("Banker build", [favside, "o:1.5"]),
@@ -450,12 +449,11 @@ def suggest_parlays(store: Store, home: str, away: str,
     out = []
     for name, legs in T:
         try:
-            r = simulate_sgp(store, home, away, legs, neutral, context,
-                             out_home=out_home, out_away=out_away)
+            r = sim.parlay(legs)
         except (ValueError, KeyError):
             continue
         p = r["joint_prob"]
-        if p < 0.015 or not r["fair_odds"]:
+        if p < MIN_PARLAY_PROB or not r["fair_odds"]:
             continue
         out.append({
             "name": name, "legs": legs,
@@ -466,7 +464,7 @@ def suggest_parlays(store: Store, home: str, away: str,
             "n_legs": len(legs),
         })
     out.sort(key=lambda x: -x["joint_prob"])
-    return out
+    return {"parlays": out, "n_sims": sim.n, "min_prob": MIN_PARLAY_PROB}
 
 
 def predict(store: Store, home: str, away: str, neutral: bool = False,
@@ -496,10 +494,11 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         "away": round((1 - p_00) * (1 - rate), 4),
         "none": round(p_00, 4),
     }
-    # Half-time: goals cluster late, so the first half carries the empirical
-    # FIRST_HALF_GOAL_SHARE of scoring — the same constant the parlay legs use,
-    # so both endpoints price half-time identically.
-    ht_mat = score_matrix(lh * FIRST_HALF_GOAL_SHARE, la * FIRST_HALF_GOAL_SHARE)
+    # Half-time: goals cluster late, so the first half carries the measured
+    # first-half share of scoring; the parlay legs use the same number, so both
+    # endpoints price half-time identically.
+    h1 = store.first_half_share or FIRST_HALF_GOAL_SHARE
+    ht_mat = score_matrix(lh * h1, la * h1)
     hi, hj = np.unravel_index(int(ht_mat.argmax()), ht_mat.shape)
     mk["half_time"] = {
         "home": round(float(np.tril(ht_mat, -1).sum()), 4),
@@ -513,14 +512,11 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
     }
 
     rh, ra = store.registry[home], store.registry[away]
-    scorers = {}
-    scorers_from_xg = False
+    scorers, assisters = {}, {}
     for tid, reg, lam in ((home, rh, lh), (away, ra, la)):
-        if reg["scope"] == "intl":
-            scorers[reg["name"]] = likely_scorers(store, reg["name"], lam)
-        elif tid in store.player_rates:
-            scorers[reg["name"]] = likely_scorers_club(store, tid, lam)
-            scorers_from_xg = True
+        scorers[reg["name"]] = likely_scorers(store, tid, reg, lam)
+        assisters[reg["name"]] = likely_assisters(store, tid, lam)
+    scorers_from_xg = home in store.player_rates or away in store.player_rates
 
     # drop players marked OUT from scorer lists, and hand their remaining share
     # of the (already reduced) team goals to the players still on the pitch
@@ -540,6 +536,7 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
                     x["fair_odds"] = fair(p2)
             rescored[t] = kept
         scorers = rescored
+        assisters = {t: [x for x in ps if x["player"] not in out_all] for t, ps in assisters.items()}
 
     caveats = []
     if eg.get("context"):
@@ -558,8 +555,8 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
     for side_adj, side_out, reg in ((adj_home, out_home or [], rh),
                                     (adj_away, out_away or [], ra)):
         for a in side_adj:
-            caveats.append(f"Adjusted for {a['player']} OUT: {reg['name']}'s expected goals "
-                           f"reduced by {a['xg_share']*65:.0f}% of team output.")
+            caveats.append(f"Adjusted for {a['player']} OUT: {reg['name']}'s goal numbers "
+                           "were reduced for the absence.")
         priced = {a["player"] for a in side_adj}
         missed = [p for p in side_out if p not in priced]
         if missed:
@@ -568,11 +565,19 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
                            "numbers are unchanged.")
     if scorers_from_xg and store.xg_data_to:
         caveats.append(f"Club scorer probabilities use shot data up to {store.xg_data_to}; "
-                       "they do not reflect transfers or injuries since then.")
+                       "players verifiably absent this season are removed and flagged "
+                       "absentees are discounted.")
+    for name in eg["unrated"]:
+        caveats.append(f"No recent results for {name}: league-average attack and defence assumed.")
     if eg["scope_mix"]:
         caveats.append("Club vs national team: Elo scales are not directly comparable, so treat this prediction as a rough guide only.")
     if not eg["same_league"] and not eg["scope_mix"]:
         caveats.append("Cross-league matchup: prediction relies mainly on Elo ratings; these teams rarely or never meet in the data.")
+    if not eg["same_league"]:
+        for reg in (rh, ra):
+            if reg.get("elo_basis") == "estimate":
+                caveats.append(f"{reg['name']}'s rating sits on the European scale by a documented "
+                               f"estimate for {reg['league_name']}, not a measured value.")
     if not rh.get("active") or not ra.get("active"):
         caveats.append("At least one team has not played recently in our data; ratings may be stale.")
     for reg in (rh, ra):
@@ -604,14 +609,18 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         margin_note = (f"A {lead} lean, but no margin dominates: the game is about as "
                        f"likely to stay within one goal ({tight:.0%}) as to open up.")
 
+    def team_block(tid: str, reg: dict) -> dict:
+        return {"id": tid, "name": reg["name"], "elo": reg["elo_global"],
+                "elo_basis": reg["elo_basis"],
+                "league": reg["league_name"], "country": reg["country"]}
+
     return {
-        "home": {"id": home, "name": rh["name"], "elo": rh["elo_global"],
-                 "league": rh["league_name"], "country": rh["country"]},
-        "away": {"id": away, "name": ra["name"], "elo": ra["elo_global"],
-                 "league": ra["league_name"], "country": ra["country"]},
+        "home": team_block(home, rh),
+        "away": team_block(away, ra),
         "neutral_venue": neutral,
         "expected_goals": {"home": round(lh, 2), "away": round(la, 2)},
-        "model_detail": eg["components"] | {"elo_diff": eg["elo_diff"], "uses_xg": eg["uses_xg"]},
+        "model_detail": eg["components"] | {"elo_diff": eg["elo_diff"], "uses_xg": eg["uses_xg"],
+                                            "first_half_share": h1},
         "context_applied": eg.get("context"),
         "verdict": {"call": verdict, "confidence": round(max(n1x2["home"], n1x2["draw"], n1x2["away"]), 3),
                     "predicted_score": mk["correct_scores"][0]["score"]},
@@ -619,6 +628,7 @@ def predict(store: Store, home: str, away: str, neutral: bool = False,
         "markets": mk,
         "score_matrix": [[round(float(mat[i, j]), 5) for j in range(7)] for i in range(7)],
         "likely_scorers": scorers,
+        "likely_assisters": assisters,
         "absences": {"home": adj_home, "away": adj_away},
         "caveats": caveats,
     }

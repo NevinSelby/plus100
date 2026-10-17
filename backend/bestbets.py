@@ -33,13 +33,24 @@ SPORT_META = {
     "soccer_uefa_european_championship": ("intl", True),
 }
 
-# registry league code -> Odds API sport key (for targeted single-match queries)
+# The one league table: registry code -> (Odds API sport key, display name, country, rank).
+# Rank is the display order in fixture rails (1 = first).
 LEAGUE_TO_SPORT = {
-    "E0": "soccer_epl", "SP1": "soccer_spain_la_liga",
-    "D1": "soccer_germany_bundesliga", "I1": "soccer_italy_serie_a",
-    "F1": "soccer_france_ligue_one", "USA": "soccer_usa_mls",
-    "MEX": "soccer_mexico_ligamx", "BRA": "soccer_brazil_campeonato",
+    "E0": ("soccer_epl", "Premier League", "England", 1),
+    "SP1": ("soccer_spain_la_liga", "La Liga", "Spain", 2),
+    "I1": ("soccer_italy_serie_a", "Serie A", "Italy", 3),
+    "D1": ("soccer_germany_bundesliga", "Bundesliga", "Germany", 4),
+    "F1": ("soccer_france_ligue_one", "Ligue 1", "France", 5),
+    "P1": ("soccer_portugal_primeira_liga", "Primeira Liga", "Portugal", 8),
+    "T1": ("soccer_turkey_super_league", "Super Lig", "Turkey", 9),
+    "USA": ("soccer_usa_mls", "MLS", "USA", 10),
+    "BRA": ("soccer_brazil_campeonato", "Serie A (Brazil)", "Brazil", 11),
+    "MEX": ("soccer_mexico_ligamx", "Liga MX", "Mexico", 12),
 }
+
+
+def sport_key(code: str) -> str | None:
+    return LEAGUE_TO_SPORT[code][0] if code in LEAGUE_TO_SPORT else None
 
 
 def candidate_sports(store: Store, sel_home: str, sel_away: str) -> list[str]:
@@ -52,22 +63,34 @@ def candidate_sports(store: Store, sel_home: str, sel_away: str) -> list[str]:
         return ["soccer_fifa_world_cup", "soccer_uefa_european_championship"]
     if rh["scope"] == "club" and ra["scope"] == "club":
         lh, la = rh["league"], ra["league"]
-        if lh == la and lh in LEAGUE_TO_SPORT:
-            return [LEAGUE_TO_SPORT[lh], "soccer_uefa_champs_league"]
-        keys = {LEAGUE_TO_SPORT.get(lh), LEAGUE_TO_SPORT.get(la)} - {None}
+        if lh == la and sport_key(lh):
+            return [sport_key(lh), "soccer_uefa_champs_league"]
+        keys = {sport_key(lh), sport_key(la)} - {None}
         return ["soccer_uefa_champs_league", *sorted(keys)]
     return list(SPORT_META)
+
+
+def odds_error(status_code: int) -> str:
+    """Classify a failed Odds API response for the UI: a key problem, an
+    exhausted quota, or anything else (treated as a network fault)."""
+    if status_code in (401, 403):
+        return "invalid_key"
+    if status_code == 429:
+        return "quota"
+    return "network"
 
 
 BASE = "https://api.the-odds-api.com/v4"
 
 
 def _window() -> tuple[str, str]:
-    """Now through the end of tomorrow (local), in the UTC ISO format the API wants."""
+    """Now through 23:59:59 UTC tomorrow, in the ISO format the API wants.
+
+    The end is taken in UTC on purpose (not the server's local zone), so the
+    window is the same wherever the process runs: a fixture is in scope while
+    its UTC kickoff falls on today or tomorrow."""
     now = dt.datetime.now(dt.timezone.utc)
-    local_tomorrow_end = (dt.datetime.now().astimezone() + dt.timedelta(days=1)) \
-        .replace(hour=23, minute=59, second=59)
-    end = local_tomorrow_end.astimezone(dt.timezone.utc)
+    end = (now + dt.timedelta(days=1)).replace(hour=23, minute=59, second=59)
     fmt = "%Y-%m-%dT%H:%M:%SZ"
     return now.strftime(fmt), end.strftime(fmt)
 
@@ -178,6 +201,98 @@ def _is_half_line(x) -> bool:
         and abs(float(x) - round(float(x))) > 0.4
 
 
+def is_value(edge_pct: float, p_blend: float) -> bool:
+    """Proportional de-vigging overstates longshot probability (books load extra
+    margin there), so long-priced outcomes must clear a higher bar."""
+    return edge_pct > (2.5 if p_blend < 0.25 else 1.0)
+
+
+def collect_groups(ev: dict, markets: tuple, home_name: str) -> dict:
+    """Bookmaker prices of one event grouped per proposition:
+    {(market, line_key): {(book_key, book_title): {outcome name: (price, point)}}}.
+
+    line_key is None for h2h, the point for totals, the HOME team's signed line
+    for spreads (Home -1.5 and Home +1.5 are different propositions and must
+    never be pooled) and (player, point) for player props, which carry the
+    player in the outcome's description."""
+    groups: dict = {}
+    for bk in ev.get("bookmakers", []):
+        for mkt in bk.get("markets", []):
+            mkey = mkt["key"]
+            if mkey not in markets:
+                continue
+            per_line: dict = {}
+            for oc in mkt.get("outcomes", []):
+                point = oc.get("point")
+                if oc.get("description"):
+                    gk = (oc["description"], point)
+                elif point is not None and mkey == "spreads":
+                    gk = float(point) if oc["name"] == home_name else -float(point)
+                else:
+                    gk = point
+                per_line.setdefault(gk, {})[oc["name"]] = (float(oc["price"]), point)
+            for gk, prices in per_line.items():
+                groups.setdefault((mkey, gk), {})[(bk["key"], bk["title"])] = prices
+    return groups
+
+
+def grade_groups(groups: dict, model_prob, label, market_weight: float,
+                 n_outcomes=None) -> list[dict]:
+    """Grade every proposition in `groups` (see collect_groups).
+
+    Per book: keep only complete n-way prices the model can grade and remove the
+    bookmaker margin proportionally. Across books: the median de-vigged
+    probability is the market view and the best price is what you could take.
+    Blend market and model with `market_weight`, then edge, quarter-Kelly stake
+    and the value flag.
+
+    model_prob(market, line_key, outcome name, point) -> probability or None
+    label(market, line_key, outcome name, point) -> text shown to the user
+    n_outcomes(market) -> prices a book must quote for the group (default 2)
+    """
+    rows = []
+    for (mkey, gk), books in groups.items():
+        need_n = n_outcomes(mkey) if n_outcomes else 2
+        devig: dict[str, list] = {}
+        best: dict[str, tuple] = {}
+        for (bkey, btitle), prices in books.items():
+            if len(prices) != need_n:
+                continue
+            if any(model_prob(mkey, gk, n, pt) is None for n, (_, pt) in prices.items()):
+                continue
+            inv = {n: 1 / pr for n, (pr, _) in prices.items()}
+            s = sum(inv.values())
+            for n, (pr, pt) in prices.items():
+                devig.setdefault(n, []).append(inv[n] / s)
+                if n not in best or pr > best[n][0]:
+                    best[n] = (pr, btitle, bkey == "hardrockbet", pt)
+        for n, plist in devig.items():
+            pr, btitle, hr, pt = best[n]
+            p_mkt = float(statistics.median(plist))
+            p_mod = model_prob(mkey, gk, n, pt)
+            p = market_weight * p_mkt + (1 - market_weight) * p_mod
+            edge = p * pr - 1
+            b_frac = pr - 1
+            kelly = max(0.0, (p * b_frac - (1 - p)) / b_frac) * 0.25
+            rows.append({
+                "market": mkey, "outcome": label(mkey, gk, n, pt),
+                "odds": round(pr, 2), "book": btitle, "at_hardrock": hr,
+                "p_market": round(p_mkt, 4), "p_model": round(p_mod, 4),
+                "p_blend": round(p, 4),
+                "edge_pct": round(edge * 100, 2),
+                "quarter_kelly_pct": round(kelly * 100, 2),
+                "books": len(plist),
+                "value": is_value(edge * 100, p),
+            })
+    rows.sort(key=lambda b: -b["edge_pct"])
+    return rows
+
+
+def count_books(events) -> int:
+    """Distinct bookmakers quoting anything across the events."""
+    return len({bk.get("key") for ev in events for bk in ev.get("bookmakers", [])})
+
+
 def _grade_event(store: Store, ev: dict, sport: str, scope: str, neutral: bool,
                  market_weight: float):
     """Grade every priced market of one event (1X2, totals, BTTS, spreads)
@@ -213,7 +328,7 @@ def _grade_event(store: Store, ev: dict, sport: str, scope: str, neutral: bool,
                 return float(mat[Am + float(point) > Hm].sum())
         return None
 
-    def label(mkey: str, name: str, point) -> str:
+    def label(mkey: str, _gk, name: str, point) -> str:
         if mkey == "h2h":
             return name if name == "Draw" else f"{name} win"
         if mkey == "totals":
@@ -222,67 +337,14 @@ def _grade_event(store: Store, ev: dict, sport: str, scope: str, neutral: bool,
             return f"Both teams score: {name}"
         return f"{name} {float(point):+g}"
 
-    # group prices: (market, line) -> {book: {outcome name: (price, point)}}
-    groups: dict = {}
-    for bk in ev.get("bookmakers", []):
-        for mkt in bk.get("markets", []):
-            mkey = mkt["key"]
-            if mkey not in ("h2h", "totals", "btts", "spreads"):
-                continue
-            per_line: dict = {}
-            for oc in mkt.get("outcomes", []):
-                point = oc.get("point")
-                # group spreads by the HOME team's signed line: Home -1.5 and
-                # Home +1.5 are different propositions and must never be pooled
-                if point is not None and mkey == "spreads":
-                    gk = float(point) if oc["name"] == ev.get("home_team") else -float(point)
-                elif point is not None:
-                    gk = point
-                else:
-                    gk = None
-                per_line.setdefault(gk, {})[oc["name"]] = (float(oc["price"]), point)
-            for gk, prices in per_line.items():
-                groups.setdefault((mkey, gk), {})[(bk["key"], bk["title"])] = prices
-
-    rows = []
-    for (mkey, gk), books in groups.items():
-        need_n = 3 if mkey == "h2h" else 2
-        devig: dict[str, list] = {}
-        best: dict[str, tuple] = {}
-        for (bkey, btitle), prices in books.items():
-            if len(prices) != need_n:
-                continue
-            if any(model_prob(mkey, n, pt) is None for n, (_, pt) in prices.items()):
-                continue  # quarter/integer lines or unknown outcomes
-            inv = {n: 1 / pr for n, (pr, _) in prices.items()}
-            s = sum(inv.values())
-            for n, (pr, pt) in prices.items():
-                devig.setdefault(n, []).append(inv[n] / s)
-                if n not in best or pr > best[n][0]:
-                    best[n] = (pr, btitle, bkey == "hardrockbet", pt)
-        for n, plist in devig.items():
-            pr, btitle, hr, pt = best[n]
-            p_mkt = float(statistics.median(plist))
-            p_mod = model_prob(mkey, n, pt)
-            p = market_weight * p_mkt + (1 - market_weight) * p_mod
-            edge = p * pr - 1
-            b_frac = pr - 1
-            kelly = max(0.0, (p * b_frac - (1 - p)) / b_frac) * 0.25
-            rows.append({
-                "home_id": hid, "away_id": aid,
-                "match": f"{home_name} vs {away_name}",
-                "commence": ev.get("commence_time"), "sport": sport,
-                "market": mkey,
-                "outcome": label(mkey, n, pt),
-                "odds": round(pr, 2), "book": btitle, "at_hardrock": hr,
-                "p_market": round(p_mkt, 4), "p_model": round(p_mod, 4),
-                "p_blend": round(p, 4),
-                "edge_pct": round(edge * 100, 2),
-                "quarter_kelly_pct": round(kelly * 100, 2),
-            })
+    groups = collect_groups(ev, ("h2h", "totals", "btts", "spreads"), home_name)
+    rows = grade_groups(groups, lambda mkey, _gk, n, pt: model_prob(mkey, n, pt), label,
+                        market_weight, n_outcomes=lambda mkey: 3 if mkey == "h2h" else 2)
+    for r in rows:
+        r.update({"home_id": hid, "away_id": aid, "match": f"{home_name} vs {away_name}",
+                  "commence": ev.get("commence_time"), "sport": sport})
     if not rows:
         return None, f"{home_name} vs {away_name} (no gradeable markets)"
-    rows.sort(key=lambda b: -b["edge_pct"])
     return rows, None
 
 
@@ -299,10 +361,8 @@ def _targeted(key: str, store: Store, market_weight: float,
                                 params={"apiKey": key, "commenceTimeFrom": t_from,
                                         "commenceTimeTo": t_to}, timeout=15)
             remaining = ev_r.headers.get("x-requests-remaining", remaining)
-            if ev_r.status_code == 401:
-                return {"error": "invalid_key"}
-            if ev_r.status_code == 429:
-                return {"error": "quota"}
+            if ev_r.status_code in (401, 403, 429):
+                return {"error": odds_error(ev_r.status_code)}
             if ev_r.status_code != 200:
                 continue
             hit = None
@@ -321,21 +381,21 @@ def _targeted(key: str, store: Store, market_weight: float,
                                   timeout=20)
             remaining = odds_r.headers.get("x-requests-remaining", remaining)
             if odds_r.status_code != 200:
-                errors.append(f"{sport}: odds HTTP {odds_r.status_code}")
+                errors.append(f"{sport}: odds HTTP {odds_r.status_code} ({odds_error(odds_r.status_code)})")
                 continue
-            rows, reason = _grade_event(store, odds_r.json(), sport, scope,
-                                        neutral, market_weight)
+            event = odds_r.json()
+            rows, reason = _grade_event(store, event, sport, scope, neutral, market_weight)
             selected = ({"match": rows[0]["match"], "commence": rows[0]["commence"],
                          "bets": rows} if rows else None)
             return {"bets": [], "selected": selected, "all_evaluated": len(rows or []),
-                    "fixtures": 1,
+                    "fixtures": 1, "n_books": count_books([event]),
                     "skipped": [reason] if reason else [], "errors": errors,
                     "remaining_credits": remaining, "targeted": sport,
                     "method": f"targeted query: one odds call for this fixture only "
-                              f"({sport}; 1X2, totals, BTTS, spreads ≈ 8 credits); "
+                              f"({sport}; 1X2, totals, BTTS, spreads, about 8 credits); "
                               f"probabilities = {int(market_weight*100)}% de-vigged "
                               f"market consensus + {int((1-market_weight)*100)}% model"}
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError) as e:     # ValueError: body was not JSON
             errors.append(f"{sport}: {e}")
     return {"bets": [], "selected": None, "all_evaluated": 0, "fixtures": 0, "skipped": [], "errors": errors,
             "remaining_credits": remaining, "targeted": None,
@@ -357,7 +417,7 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
         return _targeted(key, store, market_weight, sel_home, sel_away)
 
     t_from, t_to = _window()
-    bets, skipped, errors = [], [], []
+    bets, skipped, errors, all_events = [], [], [], []
     remaining = None
     fixtures = 0
 
@@ -367,10 +427,8 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
                                 params={"apiKey": key, "commenceTimeFrom": t_from,
                                         "commenceTimeTo": t_to}, timeout=15)
             remaining = ev_r.headers.get("x-requests-remaining", remaining)
-            if ev_r.status_code == 401:
-                return {"error": "invalid_key"}
-            if ev_r.status_code == 429:
-                return {"error": "quota"}
+            if ev_r.status_code in (401, 403, 429):
+                return {"error": odds_error(ev_r.status_code)}
             if ev_r.status_code != 200 or not ev_r.json():
                 continue
             r = requests.get(f"{BASE}/sports/{sport}/odds",
@@ -380,12 +438,15 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
                              timeout=20)
             remaining = r.headers.get("x-requests-remaining", remaining)
             if r.status_code != 200:
+                errors.append(f"{sport}: odds HTTP {r.status_code} ({odds_error(r.status_code)})")
                 continue
-        except requests.RequestException as e:
+            events = r.json()
+        except (requests.RequestException, ValueError) as e:     # ValueError: body was not JSON
             errors.append(f"{sport}: {e}")
             continue
 
-        for ev in r.json():
+        all_events.extend(events)
+        for ev in events:
             fixtures += 1
             rows, reason = _grade_event(store, ev, sport, scope, neutral, market_weight)
             if rows is None:
@@ -395,14 +456,10 @@ def best_bets(key: str, store: Store, market_weight: float = FITTED_MARKET_WEIGH
             bets.extend(rows)
 
     bets.sort(key=lambda b: -b["edge_pct"])
-    # basic proportional de-vigging overstates longshot probability (books load
-    # extra margin there), so long-priced outcomes must clear a higher bar
-    # before being called value
-    positive = [b for b in bets
-                if b["edge_pct"] > (2.5 if b["p_blend"] < 0.25 else 1.0)]
+    positive = [b for b in bets if b["value"]]
 
     return {"bets": positive[:15], "selected": None,
-            "all_evaluated": len(bets), "fixtures": fixtures,
+            "all_evaluated": len(bets), "fixtures": fixtures, "n_books": count_books(all_events),
             "skipped": skipped[:8], "errors": errors,
             "remaining_credits": remaining,
             "method": f"probabilities = {int(market_weight*100)}% de-vigged market consensus "

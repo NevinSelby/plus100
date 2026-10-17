@@ -10,12 +10,18 @@ someone last regenerated an artifact.
 The output artifact keeps the exact shape the model already consumes:
   xg_attack / xg_defence  team multipliers relative to league average
   player_rates            per team: recent scorers with their share of team xG
+  player_xa               per team: {player: share of team xA}, same shrinkage
+  xa_per_xg               measured league-wide xA per xG over the loaded leagues
   xg_data_to              freshness stamp shown in the UI
+
+A partial understat answer (any league-season missing) keeps the previous
+artifact rather than publishing strengths with holes in them.
 """
 from __future__ import annotations
 
 import datetime as dt
 import gzip
+import html
 import json
 
 import requests
@@ -69,42 +75,49 @@ def build(registry: dict, today: dt.date | None = None) -> dict | None:
 
     records = []        # (league, tid, side, date, xg_for, xg_against)
     team_games = {}     # (tid, season) -> matches played
-    players = {}        # tid -> {name: {pxg, w_apps, apps, current}}
-    minutes = {}        # tid -> {name: weighted minutes} — who actually starts
-    unmatched, loaded = set(), 0
+    players = {}        # tid -> {name: {pxg, pxa, w_apps, apps, current}}
+    minutes = {}        # tid -> {name: weighted minutes}: who actually starts
+    unmatched, missing = set(), []
+    xg_total, xa_total = 0.0, 0.0      # league-wide, unweighted, for xa_per_xg
     for us_lg, code in LEAGUES.items():
         for season in (cur, cur - 1):
             d = _fetch(us_lg, season)
             if not d:
+                missing.append(f"{us_lg} {season}")
                 continue
-            loaded += 1
             sw = 1.0 if season == cur else PREV_SEASON_WEIGHT
             for t in (d.get("teams") or {}).values():
+                hist = t.get("history") or []
+                xg_total += sum(_num(h.get("xG")) for h in hist)
                 tid = to_tid(t.get("title", ""))
                 if not tid:
                     unmatched.add(t.get("title"))
                     continue
-                hist = t.get("history") or []
                 team_games[(tid, season)] = len(hist)
                 for h in hist:
                     records.append((code, tid, h.get("h_a"), h["date"][:10],
                                     _num(h.get("xG")), _num(h.get("xGA"))))
             for p in d.get("players") or []:
+                xa_total += _num(p.get("xA"))
                 tid = to_tid(p.get("team_title", ""))
                 if not tid:
                     continue
+                name = html.unescape(p.get("player_name") or "")     # understat escapes apostrophes
                 row = players.setdefault(tid, {}).setdefault(
-                    p.get("player_name"), {"pxg": 0.0, "w_apps": 0.0, "apps": 0,
-                                           "current": False})
+                    name, {"pxg": 0.0, "pxa": 0.0, "w_apps": 0.0, "apps": 0, "current": False})
                 games = _num(p.get("games"))
                 mins = minutes.setdefault(tid, {})
-                mins[p.get("player_name")] = mins.get(p.get("player_name"), 0.0) + sw * _num(p.get("time"))
+                mins[name] = mins.get(name, 0.0) + sw * _num(p.get("time"))
                 row["pxg"] += sw * _num(p.get("xG"))
+                row["pxa"] += sw * _num(p.get("xA"))
                 row["w_apps"] += sw * games
                 row["apps"] += int(games)
                 row["current"] |= season == cur
-    if not records or loaded < len(LEAGUES):
-        return None                 # partial feed: keep the previous artifact
+    if missing or not records:
+        # every (league, season) pair must load, or the strengths would have holes
+        print(f"[xg] understat feed incomplete, keeping the previous artifact: {missing or 'no records'}")
+        return None
+    xa_per_xg = xa_total / xg_total if xg_total > 0 else 0.0
     if unmatched:
         print(f"[xg] unmatched understat teams ({len(unmatched)}): {sorted(unmatched)[:12]}")
 
@@ -137,31 +150,40 @@ def build(registry: dict, today: dt.date | None = None) -> dict | None:
         att[tid] = (att[tid] + a) / 2 if tid in att else a
         dfc[tid] = (dfc[tid] + d) / 2 if tid in dfc else d
 
-    # ---- scorer shares: shrunk xG per appearance, scaled by availability.
-    # Once a season has settled, players missing from this season's list are
-    # treated as departed rather than carried over from last year.
-    rates = {}
-    for tid, rows in players.items():
-        team_w = team_games.get((tid, cur), 0) + PREV_SEASON_WEIGHT * team_games.get((tid, cur - 1), 0)
-        if team_w <= 0:
-            continue
-        settled = team_games.get((tid, cur), 0) >= SETTLED_GAMES
-        out = []
-        for name, r in rows.items():
-            if settled and not r["current"]:
+    # ---- player shares: shrunk xG (or xA) per appearance, scaled by
+    # availability, normalised within the team. Once a season has settled,
+    # players missing from this season's list are treated as departed rather
+    # than carried over from last year.
+    def shares(field: str, prior_rate: float) -> dict:
+        out_all = {}
+        for tid, rows in players.items():
+            team_w = team_games.get((tid, cur), 0) + PREV_SEASON_WEIGHT * team_games.get((tid, cur - 1), 0)
+            if team_w <= 0:
                 continue
-            rate = (r["pxg"] + PRIOR_RATE * PRIOR_APPS) / (r["w_apps"] + PRIOR_APPS)
-            avail = min(1.0, r["w_apps"] / team_w)
-            out.append((name, rate * avail))
-        total = sum(c for _, c in out)
-        if total <= 0:
-            continue
-        out.sort(key=lambda x: -x[1])
-        rates[tid] = [{"player": n, "xg_share": round(c / total, 4)} for n, c in out[:10]]
+            settled = team_games.get((tid, cur), 0) >= SETTLED_GAMES
+            out = []
+            for name, r in rows.items():
+                if settled and not r["current"]:
+                    continue
+                rate = (r[field] + prior_rate * PRIOR_APPS) / (r["w_apps"] + PRIOR_APPS)
+                avail = min(1.0, r["w_apps"] / team_w)
+                out.append((name, rate * avail))
+            total = sum(c for _, c in out)
+            if total <= 0:
+                continue
+            out.sort(key=lambda x: -x[1])
+            out_all[tid] = [(n, round(c / total, 4)) for n, c in out[:10]]
+        return out_all
+
+    rates = {tid: [{"player": n, "xg_share": c} for n, c in v]
+             for tid, v in shares("pxg", PRIOR_RATE).items()}
+    # the assist prior is the scorer prior scaled by the measured xA per xG
+    player_xa = {tid: dict(v) for tid, v in shares("pxa", PRIOR_RATE * xa_per_xg).items()}
 
     return {"xg_attack": {k: round(v, 4) for k, v in att.items()},
             "xg_defence": {k: round(v, 4) for k, v in dfc.items()},
-            "player_rates": rates,
+            "player_rates": rates, "player_xa": player_xa,
+            "xa_per_xg": round(xa_per_xg, 4),
             "player_minutes": {tid: {n: int(m) for n, m in rows.items() if m > 0}
                                for tid, rows in minutes.items()},
             "xg_data_to": latest, "built_at": today.isoformat()}

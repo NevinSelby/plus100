@@ -6,7 +6,7 @@
 <meta name="robots" content="noindex">
 <title>Plus100 · Admin</title>
 <link rel="icon" type="image/png" href="/static/favicon.png?v=2">
-<link rel="stylesheet" href="/static/style.css?v=51">
+<link rel="stylesheet" href="/static/style.css?v=52">
 <style>
   body { background: var(--bg); }
   .wrap { max-width: 1020px; margin: 0 auto; padding: 40px 24px; }
@@ -34,7 +34,10 @@
     align-items: center; gap: 3px; height: 100%; }
   .b1 { width: 100%; background: var(--green); border-radius: 4px 4px 0 0; min-height: 2px; }
   .b2 { width: 100%; background: #8FBFF7; border-radius: 4px 4px 0 0; min-height: 2px; }
-  .bdate { font-size: 9.5px; color: var(--muted); white-space: nowrap; }
+  .bcol { min-width: 0; }
+  .bdate { font-size: 9.5px; color: var(--muted); white-space: nowrap; max-width: 100%; overflow: hidden; min-height: 14px; }
+  .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .tscroll table { min-width: 480px; }
   .legend { display: flex; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
   .mini { color: var(--muted); font-size: 12.5px; }
@@ -84,11 +87,12 @@ async function dash() {
 
   const since = new Date(d.since * 1000).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
   const maxReq = Math.max(1, ...d.daily.map(x => x.requests));
-  const bars = d.daily.map(x => `
+  const every = Math.ceil(d.daily.length / 8);   // label at most eight columns so dates never overlap
+  const bars = d.daily.map((x, i) => `
     <div class="bcol" title="${x.date}: ${x.visitors} visitors, ${x.predictions} predictions, ${x.requests} requests">
       <div class="b1" style="height:${Math.max(2, x.predictions / maxReq * 100)}%"></div>
       <div class="b2" style="height:${Math.max(2, x.requests / maxReq * 100)}%"></div>
-      <div class="bdate">${x.date.slice(5)}</div>
+      <div class="bdate">${i % every === 0 ? x.date.slice(5) : ""}</div>
     </div>`).join("");
   const fmtT = (ts) => new Date(ts * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
@@ -112,28 +116,28 @@ async function dash() {
     <div class="twocol">
       <div class="card">
         <h3 class="sec">Latest predictions</h3>
-        <table><tr><th>when</th><th>matchup</th><th>venue</th><th>IP</th><th>visitor</th></tr>
+        <div class="tscroll"><table><tr><th>when</th><th>matchup</th><th>venue</th><th>IP</th><th>visitor</th></tr>
         ${d.recent.map(r => `<tr><td>${fmtT(r.ts)}</td><td class="m">${r.home} v ${r.away}</td>
           <td>${r.neutral ? "neutral" : "home"}</td>
           <td style="font-family:monospace;font-size:11.5px">${r.ip || "–"}</td>
           <td style="font-family:monospace;font-size:11px">${r.visitor}</td></tr>`).join("")
-          || "<tr><td colspan=5 class='mini'>none yet</td></tr>"}</table>
+          || "<tr><td colspan=5 class='mini'>none yet</td></tr>"}</table></div>
       </div>
       <div class="card">
         <h3 class="sec">Most predicted matchups</h3>
-        <table><tr><th>matchup</th><th>times</th></tr>
+        <div class="tscroll"><table><tr><th>matchup</th><th>times</th></tr>
         ${d.top_matchups.map(t => `<tr><td class="m">${t.matchup}</td><td>${t.n}</td></tr>`).join("")
-          || "<tr><td colspan=2 class='mini'>none yet</td></tr>"}</table>
+          || "<tr><td colspan=2 class='mini'>none yet</td></tr>"}</table></div>
       </div>
     </div>
     ${(d.visitors && d.visitors.length) ? `
     <div class="card" style="margin-top:16px">
       <h3 class="sec">Latest visitors</h3>
-      <table><tr><th>IP</th><th>visitor</th><th>events</th><th>last seen</th></tr>
+      <div class="tscroll"><table><tr><th>IP</th><th>visitor</th><th>events</th><th>last seen</th></tr>
       ${d.visitors.map(v => `<tr>
         <td class="m" style="font-family:monospace;font-size:12.5px">${v.ip || "unknown"}</td>
         <td style="font-family:monospace;font-size:11px">${v.visitor}</td>
-        <td>${v.n}</td><td>${v.last ? fmtT(v.last) : "–"}</td></tr>`).join("")}</table>
+        <td>${v.n}</td><td>${v.last ? fmtT(v.last) : "–"}</td></tr>`).join("")}</table></div>
       <div class="mini" style="margin-top:8px">One row per device (same IP with two browsers shows twice). Events older than the ip migration show "unknown".</div>
     </div>` : ""}
     <p class="mini" style="margin-top:14px">${d.note}</p>`;

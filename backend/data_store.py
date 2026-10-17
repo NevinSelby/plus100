@@ -5,8 +5,11 @@ All heavy computation happens once at startup and is cached to a pickle.
 """
 from __future__ import annotations
 
+import datetime as dt
 import gc
+import json
 import math
+import os
 import pickle
 import re
 import unicodedata
@@ -15,19 +18,19 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import requests
 
-import json
-import os
-
-# Small cloud instances (512 MB) cannot hold the full history while building.
-# LOW_MEM trims to recent seasons and skips the on-disk cache, which is useless
-# there anyway because the filesystem is wiped on every restart.
-LOW_MEM = os.environ.get("PLUS100_LOW_MEM") == "1"
+# Small hosts can skip the oldest seasons entirely (they are never read).
 MIN_YEAR = int(os.environ.get("PLUS100_MIN_YEAR", "0") or 0)
 
 ROOT = Path(__file__).resolve().parent.parent
 DATA = ROOT / "data"
 CACHE = DATA / "store_cache.pkl"
+
+# Elo home advantage, in rating points. compute_elo builds pre_elo_diff with
+# these, so the model must use the same numbers when it reads that diff back.
+ELO_HOME_ADV_CLUB = 60.0
+ELO_HOME_ADV_INTL = 55.0
 
 LEAGUE_NAMES = {
     "E0": ("Premier League", "England"), "E1": ("Championship", "England"),
@@ -50,20 +53,22 @@ LEAGUE_NAMES = {
     "INTL": ("International", "World"),
 }
 
+# division codes in rough order of interest (fixture rail ordering)
+DIV_RANK = {"E0": 0, "SP1": 1, "I1": 2, "D1": 3, "F1": 4, "N1": 5, "P1": 6,
+            "B1": 7, "T1": 8, "SC0": 9, "E1": 10}
+
 # Absolute Elo anchors (ClubElo scale) for leagues ClubElo does not cover.
 # Rough consensus estimates of average squad strength; documented approximations.
 NON_EURO_LEAGUE_ANCHOR = {
     "BRA": 1720, "ARG": 1650, "MEX": 1600, "USA": 1530, "JPN": 1550, "CHN": 1420,
 }
 
-# Understat league file -> our league code
-
 # Understat team name -> football-data.co.uk name, where normalization fails
 UNDERSTAT_ALIASES = {
     "manchester united": "man united", "manchester city": "man city",
     "wolverhampton wanderers": "wolves", "newcastle united": "newcastle",
     "west bromwich albion": "west brom", "nottingham forest": "nott'm forest",
-    "queens park rangers": "qpr", "sheffield united": "sheffield united",
+    "queens park rangers": "qpr",
     "atletico madrid": "ath madrid", "athletic club": "ath bilbao",
     "real sociedad": "sociedad", "rayo vallecano": "vallecano",
     "celta vigo": "celta", "espanyol": "espanol", "real betis": "betis",
@@ -71,9 +76,9 @@ UNDERSTAT_ALIASES = {
     "borussia m.gladbach": "m'gladbach", "borussia monchengladbach": "m'gladbach",
     "bayer leverkusen": "leverkusen", "eintracht frankfurt": "ein frankfurt",
     "fortuna duesseldorf": "fortuna dusseldorf", "vfb stuttgart": "stuttgart",
-    "hertha berlin": "hertha", "schalke 04": "schalke 04", "fc cologne": "fc koln",
+    "hertha berlin": "hertha", "fc cologne": "fc koln",
     "paris saint germain": "paris sg", "saint-etienne": "st etienne",
-    "ac milan": "milan", "inter": "inter", "as roma": "roma",
+    "ac milan": "milan", "as roma": "roma",
     "parma calcio 1913": "parma", "spal 2013": "spal",
     "borussia dortmund": "dortmund", "hannover 96": "hannover",
     "hamburger sv": "hamburg", "mainz 05": "mainz",
@@ -95,23 +100,31 @@ UNDERSTAT_ALIASES = {
 }
 
 
-# football-data.co.uk name -> ClubElo name, for teams where normalization fails
+# football-data.co.uk name (lowercase) -> ClubElo name, where normalization fails
 CLUBELO_ALIASES = {
     "man united": "manunited", "man city": "mancity",
     "nott'm forest": "forest", "nottm forest": "forest",
     "sheffield united": "sheffieldunited", "sheffield weds": "sheffieldweds",
     "ath madrid": "atletico", "ath bilbao": "bilbao", "espanol": "espanyol",
-    "sociedad": "realsociedad", "betis": "betis", "vallecano": "rayovallecano",
-    "ein frankfurt": "frankfurt", "leverkusen": "leverkusen",
+    "sociedad": "realsociedad", "vallecano": "rayovallecano",
+    "ein frankfurt": "frankfurt",
     "m'gladbach": "gladbach", "mgladbach": "gladbach", "fc koln": "koeln",
-    "st pauli": "stpauli", "mainz": "mainz",
+    "st pauli": "stpauli",
     "paris sg": "parissg", "st etienne": "saintetienne",
     "sp lisbon": "sporting", "sp braga": "braga",
-    "inter": "inter", "milan": "milan", "roma": "roma",
     "psv eindhoven": "psv", "for sittard": "fortunasittard",
-    "waregem": "zultewaregem", "fenerbahce": "fenerbahce",
-    "besiktas": "besiktas", "galatasaray": "galatasaray",
+    "waregem": "zultewaregem",
 }
+
+
+def season_start(d) -> int:
+    """Calendar year a football season started in: July onwards is the new season."""
+    return d.year if d.month >= 7 else d.year - 1
+
+
+def season_code(start_year: int) -> str:
+    """football-data.co.uk season code: 2025 -> "2526"."""
+    return f"{start_year % 100:02d}{(start_year + 1) % 100:02d}"
 
 
 def norm_key(name: str) -> str:
@@ -138,7 +151,7 @@ def _read_csv(path: Path, **kw) -> pd.DataFrame:
 # The raw match files carry a column per bookmaker (about 100 in recent seasons).
 # Reading only what the model uses keeps peak memory small enough for modest hosts.
 _CLUB_COLS = {
-    "div", "date", "time", "hometeam", "awayteam", "fthg", "ftag",
+    "div", "date", "time", "hometeam", "awayteam", "fthg", "ftag", "hthg", "htag",
     "psh", "psd", "psa", "b365h", "b365d", "b365a", "whh", "whd", "wha",
     "avgh", "avgd", "avga",
 }
@@ -180,6 +193,10 @@ def load_club_matches() -> pd.DataFrame:
             "hg": pd.to_numeric(df["FTHG"], errors="coerce"),
             "ag": pd.to_numeric(df["FTAG"], errors="coerce"),
         })
+        # half-time goals: the measured first-half share for HT markets and parlays
+        for src, col in (("HTHG", "hthg"), ("HTAG", "htag")):
+            sub[col] = (pd.to_numeric(df[src], errors="coerce").astype("float32")
+                        if src in df.columns else np.float32("nan"))
         if odds_h:
             base = odds_h[:-1]
             sub["oddsH"] = pd.to_numeric(df.get(base + "H"), errors="coerce")
@@ -278,12 +295,11 @@ def compute_elo(matches: pd.DataFrame):
     neutrals = matches.neutral.to_numpy()
     tours = matches.tournament.to_numpy()
 
-    HA_CLUB, HA_INTL = 60.0, 55.0
     for i in range(n):
         h, a = homes[i], aways[i]
         rh = ratings.get(h, 1500.0)
         ra = ratings.get(a, 1500.0)
-        ha = 0.0 if neutrals[i] else (HA_INTL if scopes[i] == "intl" else HA_CLUB)
+        ha = 0.0 if neutrals[i] else (ELO_HOME_ADV_INTL if scopes[i] == "intl" else ELO_HOME_ADV_CLUB)
         d = rh + ha - ra
         pre_diff[i] = d
         exp_h = 1.0 / (1.0 + 10 ** (-d / 400.0))
@@ -334,38 +350,33 @@ def compute_strengths(m: pd.DataFrame, half_life_days: float = 420.0,
     age = (now - m.date).dt.days.to_numpy()
     w = 0.5 ** (age / half_life_days)
     keep = w > 0.01
-    mm = m[keep].copy()
-    mm["w"] = w[keep]
+    mm, w = m[keep], w[keep]
+    whg = mm.hg.to_numpy(dtype=float) * w
+    wag = mm.ag.to_numpy(dtype=float) * w
+    league = mm.league.to_numpy()
 
-    # league weighted average goals (home & away)
-    lg_stats = {}
-    for lg, g in mm.groupby("league", observed=True):
-        sw = g.w.sum()
-        lg_stats[lg] = {"avg_hg": float((g.hg * g.w).sum() / sw),
-                        "avg_ag": float((g.ag * g.w).sum() / sw)}
+    # league weighted average goals (home and away)
+    lg = pd.DataFrame({"league": league, "whg": whg, "wag": wag, "w": w}).groupby("league").sum()
+    lg_stats = {k: {"avg_hg": float(r.whg / r.w), "avg_ag": float(r.wag / r.w)}
+                for k, r in lg.iterrows()}
 
-    att: dict[str, float] = {}
-    deff: dict[str, float] = {}
-    rows = []
-    for side, gcol, ccol in (("home_id", "hg", "ag"), ("away_id", "ag", "hg")):
-        g = mm.groupby(side, observed=True).apply(
-            lambda x: pd.Series({
-                "gs": (x[gcol] * x.w).sum(), "gc": (x[ccol] * x.w).sum(),
-                "sw": x.w.sum(), "league": x.league.iloc[-1]}),
-            include_groups=False)
-        rows.append(g)
-    num = ["gs", "gc", "sw"]
-    agg = rows[0][num].add(rows[1][num], fill_value=0.0)
-    agg["league"] = rows[0].league.combine_first(rows[1].league)
-    for tid, r in agg.iterrows():
-        ls = lg_stats.get(r.league, {"avg_hg": 1.5, "avg_ag": 1.15})
-        lam = (ls["avg_hg"] + ls["avg_ag"]) / 2.0
-        sw = max(r.sw, 1e-9)
-        # shrink toward league average for teams with little recent data
-        prior_w = 8.0
-        att[tid] = float(((r.gs / sw) * sw + lam * prior_w) / (sw + prior_w) / lam)
-        deff[tid] = float(((r.gc / sw) * sw + lam * prior_w) / (sw + prior_w) / lam)
-    return att, deff, lg_stats
+    # one row per team appearance (home and away), aggregated in a single pass;
+    # rows keep the date-ordered index, so "last" league is the most recent one
+    def appearances(team, gs, gc):
+        return pd.DataFrame({"team": team.to_numpy(), "gs": gs, "gc": gc, "w": w,
+                             "league": league}, index=mm.index)
+
+    long = pd.concat([appearances(mm.home_id, whg, wag),
+                      appearances(mm.away_id, wag, whg)]).sort_index(kind="stable")
+    agg = long.groupby("team").agg(gs=("gs", "sum"), gc=("gc", "sum"),
+                                   sw=("w", "sum"), league=("league", "last"))
+    lam = agg.league.map(lambda k: (lg_stats[k]["avg_hg"] + lg_stats[k]["avg_ag"]) / 2.0).to_numpy()
+    sw = np.maximum(agg.sw.to_numpy(), 1e-9)
+    prior_w = 8.0   # shrink toward league average for teams with little recent data
+    att = (agg.gs.to_numpy() + lam * prior_w) / (sw + prior_w) / lam
+    deff = (agg.gc.to_numpy() + lam * prior_w) / (sw + prior_w) / lam
+    teams = agg.index.tolist()
+    return dict(zip(teams, att.tolist())), dict(zip(teams, deff.tolist())), lg_stats
 
 
 def _merge_recent(m: pd.DataFrame) -> pd.DataFrame:
@@ -387,9 +398,12 @@ def _merge_recent(m: pd.DataFrame) -> pd.DataFrame:
     r = pd.DataFrame(rows)
     r["date"] = pd.to_datetime(r.date, errors="coerce")
     r = r.dropna(subset=["date"])
-    r["season"] = r.date.map(lambda d: f"{(d.year if d.month >= 7 else d.year - 1) % 100:02d}"
-                                       f"{(d.year + 1 if d.month >= 7 else d.year) % 100:02d}")
+    r["season"] = r.date.map(lambda d: season_code(season_start(d)))
     r["scope"] = "club"
+    # a NaN here would read as True downstream and strip home advantage from
+    # exactly the freshest results: these are ordinary league games
+    r["neutral"] = False
+    r["tournament"] = ""
     club = m[m.scope == "club"]
     recent = club[club.date >= r.date.min() - pd.Timedelta(days=2)]
     have = {(str(h), str(a), d.normalize()) for h, a, d in zip(recent.home, recent.away, recent.date)}
@@ -403,8 +417,8 @@ def _merge_recent(m: pd.DataFrame) -> pd.DataFrame:
     if r.empty:
         return m
     print(f"[recent] merged {len(r)} results from ESPN not yet in the history files")
-    return pd.concat([m, r[["date", "home", "away", "hg", "ag", "league", "season", "scope"]]],
-                     ignore_index=True)
+    cols = ["date", "home", "away", "hg", "ag", "league", "season", "scope", "neutral", "tournament"]
+    return pd.concat([m, r[cols]], ignore_index=True)
 
 
 class Store:
@@ -412,6 +426,7 @@ class Store:
         club = load_club_matches()
         intl = load_intl_matches()
         m = pd.concat([club, intl], ignore_index=True)
+        del club, intl
         m = _merge_recent(m).sort_values("date").reset_index(drop=True)
 
         # team ids: clubs may share names across countries rarely; key by name+scope
@@ -423,13 +438,16 @@ class Store:
                     "home_id", "away_id", "scope"):
             if col in m.columns:
                 m[col] = m[col].astype("category")
+        m["neutral"] = m.neutral.fillna(False).astype(bool)
         for col in ("hg", "ag"):
-            if col in m.columns:
-                m[col] = pd.to_numeric(m[col], errors="coerce").fillna(-1).astype("int16")
+            m[col] = pd.to_numeric(m[col], errors="coerce").fillna(-1).astype("int16")
+        for col in ("hthg", "htag"):      # -1 where the source has no half-time score
+            m[col] = pd.to_numeric(m[col], errors="coerce").fillna(-1).astype("int8")
         for col in ("oddsH", "oddsD", "oddsA"):
             if col in m.columns:
                 m[col] = m[col].astype("float32")
         self.matches = m
+        self.first_half_share = self._first_half_share()
 
         self.ratings, pre_diff, self.elo_hist = compute_elo(m)
         m["pre_elo_diff"] = pre_diff
@@ -448,6 +466,19 @@ class Store:
         self._fit_contexts()
         self._live_eval()
         self._load_xg()
+
+    def _first_half_share(self) -> float | None:
+        """Share of club goals scored before half-time, measured on the last three
+        seasons of matches that carry a half-time score. None if none do."""
+        m = self.matches
+        ht = m[(m.scope == "club") & (m.hthg >= 0) & (m.htag >= 0)]
+        if ht.empty:
+            return None
+        ht = ht[ht.date >= ht.date.max() - pd.DateOffset(years=3)]
+        total = int(ht.hg.sum() + ht.ag.sum())
+        if total <= 0:
+            return None
+        return round(float(ht.hthg.sum() + ht.htag.sum()) / total, 4)
 
     # ---------- registry ----------
     def _build_registry(self):
@@ -468,6 +499,7 @@ class Store:
         for tid, r in reg.items():
             lg, country = LEAGUE_NAMES.get(r["league"], (r["league"], ""))
             r["league_name"], r["country"] = lg, country
+            r["nk"] = norm_key(r["name"])            # search key, computed once
             r["elo"] = round(self.ratings.get(tid, 1500.0), 1)
             r["active"] = bool((last_date - r["last"]).days < 550)
             r["last"] = str(pd.Timestamp(r["last"]).date())
@@ -483,16 +515,15 @@ class Store:
             # ClubElo unreachable: fall back to internal Elo only. Same-league
             # predictions are unaffected; European cross-league anchoring is
             # slightly weaker until the next successful refresh.
-            print("WARNING: clubelo.csv missing/empty — skipping ClubElo anchoring")
+            print("WARNING: clubelo.csv missing/empty, skipping ClubElo anchoring")
             ce_map = {}
         offsets: dict[str, list] = defaultdict(list)
         self.clubelo: dict[str, float] = {}
         for tid, r in self.registry.items():
             if r["scope"] != "club" or not r["active"]:
                 continue
-            k = norm_key(r["name"])
-            k = CLUBELO_ALIASES.get(k.replace("fc", "").strip(), CLUBELO_ALIASES.get(k, k))
-            e = ce_map.get(k) or ce_map.get(norm_key(CLUBELO_ALIASES.get(r["name"].lower(), "")))
+            k = norm_key(CLUBELO_ALIASES.get(r["name"].lower(), r["name"]))
+            e = ce_map.get(k)
             if e:
                 self.clubelo[tid] = float(e)
                 offsets[r["league"]].append(float(e) - r["elo"])
@@ -510,6 +541,9 @@ class Store:
         for tid, r in self.registry.items():
             base = self.clubelo.get(tid)
             r["elo_global"] = round(base if base else r["elo"] + self.league_offset.get(r["league"], 0.0), 1)
+            # a team placed on the European scale by a league anchor, not by data
+            r["elo_basis"] = ("estimate" if not base and r["league"] in NON_EURO_LEAGUE_ANCHOR
+                              else "measured")
 
     # ---------- attack / defence strengths ----------
     def _compute_strengths(self, half_life_days: float = 420.0):
@@ -547,56 +581,58 @@ class Store:
         backend/xg.py rebuilds it from live data on every refresh cycle."""
         self.xg_attack, self.xg_defence, self.player_rates = {}, {}, {}
         self.player_minutes, self.xg_data_to = {}, None
+        self.player_xa, self.xa_per_xg = {}, None
         pre = DATA / "xg_precomputed.json.gz"
         if not pre.exists():
             return
-        import gzip, json as _json
+        import gzip
         with gzip.open(pre, "rt") as fh:
-            blob = _json.load(fh)
+            blob = json.load(fh)
         self.xg_attack, self.xg_defence = blob["xg_attack"], blob["xg_defence"]
         self.player_rates, self.xg_data_to = blob["player_rates"], blob["xg_data_to"]
         self.player_minutes = blob.get("player_minutes", {})
+        # assist shares (same normalisation as scorer shares) and the league-wide
+        # measured xA per xG that turns a team's expected goals into expected assists
+        self.player_xa = blob.get("player_xa", {})
+        self.xa_per_xg = blob.get("xa_per_xg")
         print(f"[xg] loaded strengths to {self.xg_data_to} ({len(self.player_rates)} squads)")
 
     def _fit_contexts(self):
         """Fitted multipliers for how the match context shifts expected goals.
         Fitted from history where possible; research-based estimates are labeled."""
         m = self.matches
-        intl = m[(m.scope == "intl") & (m.date >= "1995-01-01")]
+        intl_all = m[m.scope == "intl"]
+        # one lowercase pass over the tournament names; every label below reads it
+        tl = intl_all.tournament.astype(str).str.lower()
+        intl = intl_all[intl_all.date >= "1995-01-01"]
         pooled = float((intl.hg + intl.ag).mean())
 
-        def env_of(t):
-            tl = t.lower()
-            if "friendly" in tl:
-                return "friendly"
-            if "qualification" in tl:
-                return "qualifier"
-            return "finals"
-
-        envs = intl.tournament.map(env_of)
+        tl95 = tl.loc[intl.index]
+        envs = np.where(tl95.str.contains("friendly", regex=False), "friendly",
+                        np.where(tl95.str.contains("qualification", regex=False), "qualifier", "finals"))
         scales = {}
         for e in ("friendly", "qualifier", "finals"):
             g = intl[envs == e]
             scales[e] = {"scale": round(float((g.hg + g.ag).mean()) / pooled, 3),
                          "fitted": True, "n": int(len(g))}
 
-        # third-place playoffs + finals of major tournaments (heuristic labeling)
+        # third-place playoffs + finals of major tournaments (heuristic labeling):
+        # World Cup, Copa America, Euro, Africa Cup of Nations, Asian Cup
+        stem = tl.str.extract(r"(fifa|copa|uefa|african|afc)", expand=False)
+        major = intl_all[stem.notna() & ~tl.str.contains("qual", regex=False)]
         tp_rows, fin_rows = [], []
-        for stem in ("FIFA World Cup", "Copa Am", "UEFA Euro", "African Cup", "AFC Asian Cup"):
-            tm = m[(m.tournament.str.contains(stem.split()[0], na=False)) &
-                   (~m.tournament.str.contains("qual", case=False, na=False))]
-            for _, g in tm.groupby(tm.date.dt.year, observed=True):
-                if len(g) < 8:
-                    continue
-                gg = g.sort_values("date")
-                final_day = gg.date.max()
-                final_match = gg[gg.date == final_day].iloc[-1]
-                finalists = {final_match.home, final_match.away}
-                fin_rows.append(final_match)
-                cand = gg[(gg.date >= final_day - pd.Timedelta(days=2)) & (gg.date < final_day)]
-                cand = cand[~cand.home.isin(finalists) & ~cand.away.isin(finalists)]
-                if len(cand) == 1:
-                    tp_rows.append(cand.iloc[0])
+        for _, g in major.groupby([stem.loc[major.index], major.date.dt.year], observed=True):
+            if len(g) < 8:
+                continue
+            gg = g.sort_values("date")
+            final_day = gg.date.max()
+            final_match = gg[gg.date == final_day].iloc[-1]
+            finalists = {final_match.home, final_match.away}
+            fin_rows.append(final_match)
+            cand = gg[(gg.date >= final_day - pd.Timedelta(days=2)) & (gg.date < final_day)]
+            cand = cand[~cand.home.isin(finalists) & ~cand.away.isin(finalists)]
+            if len(cand) == 1:
+                tp_rows.append(cand.iloc[0])
         finals_scale = scales["finals"]["scale"]
         if tp_rows:
             tp = pd.DataFrame(tp_rows)
@@ -662,57 +698,81 @@ class Store:
                  ((m.home_id == b) & (m.away_id == a))]
 
 
-STORE_CODE_VERSION = 5  # bump when Store gains new computed attributes
+STORE_CODE_VERSION = 6  # bump when Store gains new computed attributes
+
+
+# ---------- source files: one job list shared by first boot and every refresh ----------
+FD_BASE = "https://www.football-data.co.uk"
+INTL_BASE = "https://raw.githubusercontent.com/martj42/international_results/master"
+INTL_FILES = ("results.csv", "goalscorers.csv")
+UA = {"User-Agent": "Mozilla/5.0 (Plus100)"}
+MIN_FILE_BYTES = 500      # anything smaller is an error page, not data
+
+
+def source_jobs(seasons: list[str]):
+    """(url, destination, timeout) for every downloadable source: the club league
+    files for the given season codes, the extra leagues, the international
+    results and today's ClubElo table."""
+    for s in seasons:
+        for lg in MAIN_LEAGUES:
+            yield f"{FD_BASE}/mmz4281/{s}/{lg}.csv", DATA / "club" / f"{lg}_{s}.csv", 60
+    for lg in EXTRA_LEAGUES:
+        yield f"{FD_BASE}/new/{lg}.csv", DATA / "extra" / f"{lg}.csv", 60
+    for f in INTL_FILES:
+        yield f"{INTL_BASE}/{f}", DATA / "international" / f, 60
+    yield f"http://api.clubelo.com/{dt.date.today().isoformat()}", DATA / "elo" / "clubelo.csv", 90
+
+
+def fetch_file(url: str, dest: Path, timeout: int = 60) -> bool:
+    """Download to a temp file and replace dest only on a good response.
+    Returns True when the file on disk changed."""
+    try:
+        r = requests.get(url, headers=UA, timeout=timeout)
+    except requests.RequestException:
+        return False
+    if r.status_code != 200 or len(r.content) < MIN_FILE_BYTES:
+        return False
+    if dest.exists() and dest.read_bytes() == r.content:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(dest.suffix + ".tmp")
+    tmp.write_bytes(r.content)
+    tmp.replace(dest)
+    return True
 
 
 def _bootstrap_download() -> None:
     """First boot on a fresh deployment (empty data dir): fetch the full
-    historical dataset. Mirrors scripts/download_data.py."""
+    historical dataset, skipping files already present."""
     import concurrent.futures as cf
-    import datetime as _dt
 
-    import requests as _rq
-
-    ua = {"User-Agent": "Mozilla/5.0 (Plus100 bootstrap)"}
-    main_lg, extra_lg = MAIN_LEAGUES, EXTRA_LEAGUES
-    today = _dt.date.today()
-    last_start = today.year if today.month >= 7 else today.year - 1
-    first = max(2000, MIN_YEAR) if MIN_YEAR else 2000
-    seasons = [f"{y % 100:02d}{(y + 1) % 100:02d}" for y in range(first, last_start + 1)]
-    for sub in ("club", "extra", "international", "elo"):
-        (DATA / sub).mkdir(parents=True, exist_ok=True)
-
-    jobs = [(f"https://www.football-data.co.uk/mmz4281/{s}/{lg}.csv",
-             DATA / "club" / f"{lg}_{s}.csv") for s in seasons for lg in main_lg]
-    jobs += [(f"https://www.football-data.co.uk/new/{lg}.csv",
-              DATA / "extra" / f"{lg}.csv") for lg in extra_lg]
-    jobs += [(f"https://raw.githubusercontent.com/martj42/international_results/master/{f}",
-              DATA / "international" / f)
-             for f in ("results.csv", "goalscorers.csv", "shootouts.csv")]
-    jobs += [(f"http://api.clubelo.com/{today.isoformat()}", DATA / "elo" / "clubelo.csv")]
-
-    def fetch(url: str, dest: Path) -> None:
-        if dest.exists() and dest.stat().st_size > 500:
-            return
-        try:
-            r = _rq.get(url, headers=ua, timeout=60)
-            if r.status_code == 200 and len(r.content) > 200:
-                dest.write_bytes(r.content)
-        except _rq.RequestException:
-            pass
-
-    print(f"[bootstrap] downloading full dataset ({len(jobs)} files)…")
+    first = max(2000, MIN_YEAR)
+    seasons = [season_code(y) for y in range(first, season_start(dt.date.today()) + 1)]
+    jobs = [j for j in source_jobs(seasons)
+            if not (j[1].exists() and j[1].stat().st_size >= MIN_FILE_BYTES)]
+    print(f"[bootstrap] downloading full dataset ({len(jobs)} files)")
     with cf.ThreadPoolExecutor(max_workers=8) as ex:
-        list(ex.map(lambda j: fetch(*j), jobs))
+        list(ex.map(lambda j: fetch_file(*j), jobs))
     print("[bootstrap] done")
+
+
+def _cache_sig() -> tuple:
+    """Everything the built store depends on: code version, the match files, and
+    the two side artifacts merged at build time (xG blob, this week's ESPN results)."""
+    files = sorted(DATA.rglob("*.csv"))
+    side = []
+    for f in (DATA / "xg_precomputed.json.gz", DATA / "espn_recent.json"):
+        st = f.stat() if f.exists() else None
+        side.append((f.name, int(st.st_mtime) if st else 0, st.st_size if st else 0))
+    return (STORE_CODE_VERSION, MIN_YEAR, len(files),
+            sum(f.stat().st_size for f in files), tuple(side))
 
 
 def get_store(force: bool = False) -> Store:
     if not any((DATA / "club").glob("*.csv")):
         _bootstrap_download()
-    files = sorted(DATA.rglob("*.csv"))
-    sig = (STORE_CODE_VERSION, LOW_MEM, MIN_YEAR, len(files), sum(f.stat().st_size for f in files))
-    if CACHE.exists() and not force and not LOW_MEM:
+    sig = _cache_sig()
+    if CACHE.exists() and not force:
         try:
             with open(CACHE, "rb") as fh:
                 cached_sig, store = pickle.load(fh)
@@ -721,9 +781,8 @@ def get_store(force: bool = False) -> Store:
         except Exception:  # noqa: BLE001
             pass
     store = Store()
-    if not LOW_MEM:
-        with open(CACHE, "wb") as fh:
-            pickle.dump((sig, store), fh)
+    with open(CACHE, "wb") as fh:
+        pickle.dump((sig, store), fh)
     gc.collect()
     return store
 

@@ -1,23 +1,21 @@
 """Automatic data refresh: keeps ratings current without manual steps.
 
-Every REFRESH_HOURS (and once at startup if data is stale), volatile sources are
-re-downloaded — current + previous season results for all leagues, the
-international dataset, extra leagues, ClubElo — the model store is rebuilt in a
-background thread and hot-swapped into the running app.
+Once at startup (if the stored results are more than a day old) and then
+whenever a request arrives more than REFRESH_HOURS after the last refresh
+(see maybe_refresh; the keepalive ping counts as a request), the volatile
+sources are re-downloaded: current + previous season results for all leagues,
+the international dataset, extra leagues, ClubElo. The model store is rebuilt
+in a background thread and hot-swapped into the running app.
 """
 from __future__ import annotations
 
 import datetime as dt
 import threading
 import time
-from pathlib import Path
 
-import requests
-
-from .data_store import CACHE, DATA, EXTRA_LEAGUES, MAIN_LEAGUES, get_store
+from .data_store import CACHE, DATA, fetch_file, get_store, season_code, season_start, source_jobs
 
 REFRESH_HOURS = 3
-UA = {"User-Agent": "Mozilla/5.0 (Plus100 refresher)"}
 
 state = {
     "last_refresh": None,      # iso str
@@ -25,15 +23,6 @@ state = {
     "last_error": None,
 }
 
-
-def _season_codes(today: dt.date) -> list[str]:
-    y = today.year if today.month >= 7 else today.year - 1
-    cur = f"{y % 100:02d}{(y + 1) % 100:02d}"
-    prev = f"{(y - 1) % 100:02d}{y % 100:02d}"
-    return [prev, cur]
-
-
-INTL_FILES = ["results.csv", "goalscorers.csv", "shootouts.csv"]
 RECENT_FILE = DATA / "espn_recent.json"
 
 
@@ -61,8 +50,10 @@ def refresh_recent_results(store) -> bool:
                 ledger = {"done": {}, "rows": ledger}
         except (OSError, ValueError):
             pass
-    done = {k: set(v) for k, v in ledger.get("done", {}).items()}
-    rows = [x for x in ledger.get("rows", []) if x.get("date", "") >= start.isoformat()]
+    # the ledger only needs to remember the window it still fetches from
+    cutoff = start.isoformat()
+    done = {k: {d for d in v if d >= cutoff} for k, v in ledger.get("done", {}).items()}
+    rows = [x for x in ledger.get("rows", []) if x.get("date", "") >= cutoff]
     codes = [c for c in espn.SOCCER_SLUGS if any(r["league"] == c for r in store.registry.values())]
     changed = False
     day = start
@@ -91,7 +82,7 @@ def refresh_recent_results(store) -> bool:
             if not fresh:
                 done.setdefault(code, set()).add(key)
         day += dt.timedelta(days=1)
-    payload = {"done": {k: sorted(v) for k, v in done.items()},
+    payload = {"done": {k: sorted(v) for k, v in done.items() if v},
                "rows": sorted(rows, key=lambda x: (x["date"], x["league"], x["home"]))}
     text = json.dumps(payload)
     if changed or not RECENT_FILE.exists():
@@ -104,42 +95,24 @@ def app_store_latest(store) -> dt.date:
     return store.matches.date.max().date()
 
 
-def _fetch_replace(url: str, dest: Path, timeout: int = 45) -> bool:
-    """Download to a temp file; replace dest only on a good response."""
-    try:
-        r = requests.get(url, headers=UA, timeout=timeout)
-        if r.status_code == 200 and len(r.content) > 500:
-            tmp = dest.with_suffix(dest.suffix + ".tmp")
-            tmp.write_bytes(r.content)
-            changed = not dest.exists() or dest.read_bytes() != r.content
-            tmp.replace(dest)
-            return changed
-    except requests.RequestException:
-        pass
-    return False
-
-
 def refresh_files() -> bool:
-    """Re-download everything that changes between matchdays. Returns True if
+    """Re-download everything that changes between matchdays (the current and
+    previous season of every league, plus the shared sources). Returns True if
     any file actually changed."""
+    y = season_start(dt.date.today())
     changed = False
-    today = dt.date.today()
-    for season in _season_codes(today):
-        for lg in MAIN_LEAGUES:
-            changed |= _fetch_replace(
-                f"https://www.football-data.co.uk/mmz4281/{season}/{lg}.csv",
-                DATA / "club" / f"{lg}_{season}.csv")
-    for lg in EXTRA_LEAGUES:
-        changed |= _fetch_replace(
-            f"https://www.football-data.co.uk/new/{lg}.csv",
-            DATA / "extra" / f"{lg}.csv")
-    for f in INTL_FILES:
-        changed |= _fetch_replace(
-            f"https://raw.githubusercontent.com/martj42/international_results/master/{f}",
-            DATA / "international" / f)
-    changed |= _fetch_replace(f"http://api.clubelo.com/{today.isoformat()}",
-                              DATA / "elo" / "clubelo.csv", timeout=90)
+    for url, dest, timeout in source_jobs([season_code(y - 1), season_code(y)]):
+        changed |= fetch_file(url, dest, timeout)
     return changed
+
+
+def _start_prewarm() -> None:
+    """Fill the per-team caches for the coming week's fixtures off-thread."""
+    try:
+        from .app import _prewarm
+        threading.Thread(target=_prewarm, daemon=True, name="plus100-prewarm").start()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def refresh_now() -> None:
@@ -168,15 +141,11 @@ def refresh_now() -> None:
             app_module.store = get_store(force=True)
         state["last_refresh"] = dt.datetime.now().isoformat(timespec="seconds")
         state["last_ts"] = time.time()
-    except Exception as e:  # noqa: BLE001 — a failed refresh must never kill the loop
+    except Exception as e:  # noqa: BLE001 (a failed refresh must never kill the app)
         state["last_error"] = str(e)
     finally:
         state["refreshing"] = False
-        try:
-            from .app import _prewarm
-            threading.Thread(target=_prewarm, daemon=True, name="plus100-prewarm").start()
-        except Exception:  # noqa: BLE001
-            pass
+        _start_prewarm()
 
 
 def maybe_refresh() -> None:
@@ -205,14 +174,15 @@ def _data_age_days() -> float:
 
 
 def start_background() -> None:
-    def loop():
+    """Startup check: refresh now if the stored results are stale, otherwise
+    just stamp the cadence clock and warm the caches. Later refreshes are
+    driven by maybe_refresh() from the request path."""
+    def once():
         if _data_age_days() > 1:
-            refresh_now()
+            refresh_now()                 # its finally block starts the prewarm
         else:
             state["last_refresh"] = dt.datetime.now().isoformat(timespec="seconds")
             state["last_ts"] = time.time()
-        while True:
-            time.sleep(REFRESH_HOURS * 3600)
-            refresh_now()
+            _start_prewarm()
 
-    threading.Thread(target=loop, daemon=True, name="plus100-refresher").start()
+    threading.Thread(target=once, daemon=True, name="plus100-refresher").start()
