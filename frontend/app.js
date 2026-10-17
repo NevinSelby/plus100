@@ -60,6 +60,7 @@ function animateIn(root) {
   fresh(".hbar > div, .stack > div").forEach(b => {
     const w = b.style.width; b.style.width = "0%";
     requestAnimationFrame(() => requestAnimationFrame(() => { b.style.width = w; }));
+    setTimeout(() => { b.style.width = w; }, 120);   // frames do not run in a hidden tab
   });
   fresh(".count").forEach(el => {
     const final = el.textContent, m = final.match(/([\d.]+)/); if (!m) return;
@@ -71,6 +72,7 @@ function animateIn(root) {
       el.textContent = k < 1 ? pre + (target * e).toFixed(dec) + post : final;
       if (k < 1) requestAnimationFrame(tick);
     })(t0);
+    setTimeout(() => { el.textContent = final; }, 1000);   // hidden tabs get no frames: land on the real number anyway
   });
 }
 /* broken player photos: swap in initials (data-fallback) or vanish (data-hide), no inline handlers */
