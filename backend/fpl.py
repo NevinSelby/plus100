@@ -537,6 +537,21 @@ def state_get(key: str):
         return None
 
 
+def state_probe(key: str = "model_squad") -> dict:
+    """What the record store answers right now (status and a short body), for the admin page.
+    Never includes the key."""
+    conf = _sb_conf()
+    if not conf:
+        return {"configured": False}
+    u, k = conf
+    try:
+        r = requests.get(f"{u}/rest/v1/fpl_state", headers=_sb_h(k), timeout=10,
+                         params={"key": f"eq.{key}", "select": "key"})
+        return {"configured": True, "status": r.status_code, "body": r.text[:160]}
+    except Exception as e:  # noqa: BLE001
+        return {"configured": True, "status": None, "body": f"{type(e).__name__}: {str(e)[:120]}"}
+
+
 def state_put(key: str, value, insert_only: bool = False) -> bool:
     """Save a value. insert_only never replaces an existing row (used for seeds)."""
     saved = False

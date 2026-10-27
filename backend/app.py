@@ -1125,7 +1125,8 @@ def admin_fpl_state(request: Request, key: str = "model_squad"):
     """Read one stored fantasy record (the model squad or an archive) for inspection."""
     _require_admin(request)
     v = _fpl.state_get(key)
-    return {"key": key, "unavailable": v is _fpl.UNAVAILABLE, "value": None if v is _fpl.UNAVAILABLE else v}
+    return {"key": key, "unavailable": v is _fpl.UNAVAILABLE, "value": None if v is _fpl.UNAVAILABLE else v,
+            "probe": _fpl.state_probe(key) if v is _fpl.UNAVAILABLE else None}
 
 
 @app.post("/api/admin/fpl/state")
