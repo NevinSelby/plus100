@@ -185,4 +185,14 @@ def start_background() -> None:
             state["last_ts"] = time.time()
             _start_prewarm()
 
+    def nba_first():
+        # the NBA append is a handful of scoreboard calls; it must not wait behind
+        # the football downloads, or a fresh instance serves last season's ratings
+        try:
+            from .nba import refresh_games
+            refresh_games()
+        except Exception as e:  # noqa: BLE001
+            state["last_error"] = f"nba boot refresh: {e}"
+
+    threading.Thread(target=nba_first, daemon=True, name="plus100-nba-boot").start()
     threading.Thread(target=once, daemon=True, name="plus100-refresher").start()

@@ -648,6 +648,9 @@ def predict(home: str, away: str, neutral: bool = False, date=None) -> dict:
         if n < 5:
             caveats.append(f"{team} have played {n} game{'s' if n != 1 else ''} this season: the rating is last "
                            f"season's, regressed {SEASON_REGRESS:.0%} of the way to the mean.")
+    if day and m["data_to"] and (day - dt.date.fromisoformat(m["data_to"])).days > 3 and day.month not in (7, 8, 9):
+        caveats.append(f"Stored results run to {m['data_to']}; newer games are being fetched and the ratings "
+                       "and rest days will update within a few minutes.")
     mk = market_line(home, away, day)
     if mk:
         if mk["line"] is not None and abs(mk["line"] - mu) >= 6:
