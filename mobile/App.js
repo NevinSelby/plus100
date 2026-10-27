@@ -1643,7 +1643,7 @@ function PropsTeam({ team, color }) {
               <Text style={s.propName} numberOfLines={1}>{pl.name}
                 {flag ? <Text style={{ color: C.amber, fontSize: 12 }}>  {pl.status}</Text> : null}</Text>
               <Text style={[s.optSub, TNUM, { marginTop: 1 }]} numberOfLines={1}>
-                {pl.pos}{pl.minutes != null ? ` · ${Math.round(pl.minutes)} min` : ""}</Text>
+                {pl.pos}{pl.minutes != null ? ` · ${Math.round(pl.minutes)} min` : ""}{pl.games_this_season != null ? ` · ${pl.games_this_season} gp` : ""}</Text>
             </View>
             {PROP_COLS.map(([key, lbl]) => {
               const st = pl.stats?.[key];
@@ -1838,7 +1838,10 @@ function NbaPredictScreen({ api, nba, patchNba, nbaMeta, cache, cacheSet, bankro
             <Card delay={0} style={s.heroCard}>
               <View style={s.sbTop}>
                 <Text style={[s.sbTopTxt, { color: C.lime, flexShrink: 0 }]} numberOfLines={1}>PROJECTED FINAL{p.neutral_venue ? <Text style={{ color: C.muted }}> · NEUTRAL</Text> : null}</Text>
-                <Text style={[s.sbTopTxt, TNUM, { color: C.dim, flex: 1, textAlign: "right" }]} numberOfLines={1} adjustsFontSizeToFit>{spreadTxt} · O/U {pr.total.toFixed(1)}</Text>
+                <View style={{ flex: 1, alignItems: "flex-end" }}>
+                  <Text style={[s.sbTopTxt, TNUM, { color: C.dim }]} numberOfLines={1} adjustsFontSizeToFit>{spreadTxt} · O/U {pr.total.toFixed(1)}</Text>
+                  {p.market ? <Text style={[s.sbTopTxt, TNUM, { color: C.muted, fontSize: 10.5 }]} numberOfLines={1}>BOOKS {p.market.text || ""}{p.market.total != null ? ` · O/U ${p.market.total}` : ""}</Text> : null}
+                </View>
               </View>
               <NbaTeamLine p={p} side="home" team={home} color={kitH} tag="HOME" />
               <NbaTeamLine p={p} side="away" team={away} color={kitA} tag="AWAY" />

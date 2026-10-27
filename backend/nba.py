@@ -55,6 +55,8 @@ B2B_PTS = 1.4                  # tired side on the second night of a back-to-bac
 RECENT_HALF_LIFE = 22.0        # games, for team scoring/defending rates
 PROP_HALF_LIFE = 15.0          # games, for player per-game stats
 ROTATION = 8                   # players priced per side
+PRIOR_GAMES = 12.0             # last season counts as this many games against this season's log
+FACTOR_CAP = 0.10              # matchup scaling of a player's averages is held within 10 percent
 MIN_PROP_MEAN = 0.5            # below this weighted average a stat line is not offered
 MIN_FIT_GAMES = 200
 # injury pricing: assumptions, listed in every prediction's caveats
@@ -319,8 +321,9 @@ def build() -> dict:
         if s < cur_season:
             elo[t] += SEASON_REGRESS * (1505.0 - elo[t])
 
-    # ---- totals: league scoring and spread over the latest two seasons with data
-    recent = [r for r in recs if seasons and r["season"] >= seasons[-1] - 1]
+    # ---- totals: league scoring and spread over the latest two REGULAR seasons
+    #      (playoff games are slower and lower scoring; recs align 1:1 with games)
+    recent = [r for r, g in zip(recs, games) if seasons and r["season"] >= seasons[-1] - 1 and g["stype"] == 2]
     tot = np.array([r["total"] for r in recent], dtype=float)
     lg_total = float(tot.mean()) if len(tot) else 228.0
     sd_t = float(tot.std()) if len(tot) > 50 else 19.0
@@ -340,11 +343,13 @@ def build() -> dict:
     pa: dict[str, list] = {}
     games_this_season: dict[str, int] = {}
     for g in games:
-        pf.setdefault(g["home"], []).append(g["hs"]); pa.setdefault(g["home"], []).append(g["as"])
-        pf.setdefault(g["away"], []).append(g["as"]); pa.setdefault(g["away"], []).append(g["hs"])
         if g["season"] == cur_season:
             for t in (g["home"], g["away"]):
                 games_this_season[t] = games_this_season.get(t, 0) + 1
+        if g["stype"] != 2:
+            continue                      # scoring rates: regular season only
+        pf.setdefault(g["home"], []).append(g["hs"]); pa.setdefault(g["home"], []).append(g["as"])
+        pf.setdefault(g["away"], []).append(g["as"]); pa.setdefault(g["away"], []).append(g["hs"])
 
     def ew(vals):
         v = np.array(vals[-60:], dtype=float)
@@ -524,6 +529,30 @@ def _injury_impact(team: str) -> tuple[float, list, bool]:
 
 
 # ------------------------------------------------------------------ prediction
+def market_line(home: str, away: str, day: dt.date | None) -> dict | None:
+    """The consensus line ESPN publishes on its scoreboard for this game, as the
+    home margin (home minus away) and the total. None when the game is not
+    listed or carries no line yet. Live and free; shown beside our number."""
+    if day is None:
+        return None
+    for g in espn.nba_scoreboard(day, ttl=1800) or []:
+        if resolve(g["home"]) != home or resolve(g["away"]) != away:
+            continue
+        text, total = g.get("odds"), g.get("ou")
+        line = None
+        if text and " " in text:
+            fav, num = text.rsplit(" ", 1)
+            try:
+                v = abs(float(num))
+                line = v if fav == _team_card(home, None)["abbr"] else -v
+            except ValueError:
+                line = None
+        if line is None and total is None:
+            return None
+        return {"line": line, "total": total, "text": text, "provider": "ESPN consensus line"}
+    return None
+
+
 def _as_date(date) -> dt.date | None:
     if date is None or date == "":
         return None
@@ -619,8 +648,16 @@ def predict(home: str, away: str, neutral: bool = False, date=None) -> dict:
         if n < 5:
             caveats.append(f"{team} have played {n} game{'s' if n != 1 else ''} this season: the rating is last "
                            f"season's, regressed {SEASON_REGRESS:.0%} of the way to the mean.")
+    mk = market_line(home, away, day)
+    if mk:
+        if mk["line"] is not None and abs(mk["line"] - mu) >= 6:
+            caveats.append(f"The books have this at {mk['text']}; a gap that wide from our number usually means a "
+                           "roster change the ratings have not caught up with yet.")
+        if mk["total"] is not None and abs(mk["total"] - tot) >= 8:
+            caveats.append(f"The books total this game at {mk['total']}; our scoring rates come from the last "
+                           f"{int(RECENT_HALF_LIFE)} or so regular-season games and lag a changed roster or pace.")
     return {
-        "sport": "basketball",
+        "sport": "basketball", "market": mk,
         "home": {"id": home, "name": home, "elo": round(m["elo"][home]), "rest_days": rest_h,
                  "injuries": inj_h, "injuries_unavailable": unav_h},
         "away": {"id": away, "name": away, "elo": round(m["elo"][away]), "rest_days": rest_a,
@@ -792,19 +829,42 @@ def _rotation(team: str) -> tuple[list[dict], str | None]:
     return players[:ROTATION], None
 
 
-def _player_logs(pid: str, season: int) -> list[dict] | None:
-    """Game logs for this season, extended with last season's while this one is
-    short (fewer than 40 games; with a 15-game half-life older games still carry
-    weight). None when ESPN could not be reached."""
-    logs = espn.nba_gamelog(pid, season)
-    if logs is None:
+def _player_logs(pid: str, season: int) -> tuple[list[dict], list[dict]] | None:
+    """(this season's logs, last season's logs), games actually played only.
+    Last season is fetched while this season is short of 40 games. None when
+    ESPN could not be reached for either."""
+    cur = espn.nba_gamelog(pid, season)
+    if cur is None:
         return None
-    if len(logs) < 40:
+    prev = []
+    if len(cur) < 40:
         prev = espn.nba_gamelog(pid, season - 1)
-        if prev is None and not logs:
-            return None
-        logs = (prev or []) + logs
-    return [g for g in logs if g["minutes"] > 0]
+        if prev is None:
+            if not cur:
+                return None
+            prev = []
+    played = lambda logs: [g for g in logs if g["minutes"] > 0]
+    return played(cur), played(prev)
+
+
+def _blend_stats(cur: list[dict], prev: list[dict]) -> dict:
+    """This season's weighted averages shrunk toward last season's, with last
+    season worth PRIOR_GAMES games: after 3 games this season carries 20% of the
+    mean, after 12 games half, after 36 games three quarters. Spreads come from
+    the pooled log so a short season cannot look falsely steady."""
+    n = len(cur)
+    sc = _ew_stats(cur) if cur else None
+    sp = _ew_stats(prev) if prev else None
+    pooled = _ew_stats(prev + cur)
+    w = n / (n + PRIOR_GAMES)
+    out = {}
+    for k in STATS + ("minutes",):
+        if sc and sp:
+            mean = w * sc[k][0] + (1 - w) * sp[k][0]
+        else:
+            mean = (sc or sp)[k][0]
+        out[k] = (mean, pooled[k][1])
+    return out
 
 
 def player_props(home: str, away: str, date=None) -> dict:
@@ -817,12 +877,13 @@ def player_props(home: str, away: str, date=None) -> dict:
     season = m["season_year"]
     report = espn.nba_injuries()
     caveats = [
-        f"Means and spreads are exponentially weighted (half-life {PROP_HALF_LIFE:.0f} games) over the player's "
-        "regular-season and playoff logs from this season and last; minutes are the same weighted average, so a "
-        "role that changed this season takes a few weeks to show.",
+        f"This season's games lead: a player's averages are the exponentially weighted mean of this season's logs "
+        f"(half-life {PROP_HALF_LIFE:.0f} games) shrunk toward last season's, with last season worth {PRIOR_GAMES:.0f} games. "
+        "Three games in, this season already carries a fifth of the number; by game twelve, half. Minutes follow the same rule.",
         "Points, threes and assists are scaled by the model's projected points for the player's team in this "
         "matchup relative to the team's own recent scoring rate (this is where the opponent's defence enters); "
-        "rebounds by the projected total relative to the league average as a pace proxy. The spread scales with the mean.",
+        f"rebounds by the projected total relative to the league average as a pace proxy. Either factor is held within "
+        f"{int(FACTOR_CAP * 100)} percent, and the spread scales with the mean.",
         f"Rotation = the {ROTATION} current-roster players with the most minutes per game (this season, else last). "
         "New signings and rookies without an NBA record are not listed. Starters resting late in blowouts are not modelled.",
         "A normal curve is used for every stat; it is coarse for low counts such as threes.",
@@ -845,15 +906,20 @@ def player_props(home: str, away: str, date=None) -> dict:
         with ThreadPoolExecutor(max_workers=8) as ex:
             logs = list(ex.map(lambda pl: _player_logs(pl["id"], season), kept))
         off = m["off"].get(team) or m["lg_total"] / 2
-        f_team = proj_pts / off
-        f_pace = p["projected"]["total"] / m["lg_total"]
+        clamp = lambda f: max(1 - FACTOR_CAP, min(1 + FACTOR_CAP, f))
+        f_team = clamp(proj_pts / off)
+        f_pace = clamp(p["projected"]["total"] / m["lg_total"])
         rows = []
         for pl, lg in zip(kept, logs):
-            if lg is None or len(lg) < 5:
-                continue                     # no log, or too few games to measure anything
-            st = _ew_stats(lg)
+            if lg is None:
+                continue                     # ESPN could not be reached for this player
+            cur, prev = lg
+            if len(cur) + len(prev) < 5:
+                continue                     # too few games to measure anything
+            st = _blend_stats(cur, prev)
             rows.append({"name": pl["name"], "pos": pl["pos"], "headshot": pl["img"], "id": pl["id"],
-                         "games": len(lg), "minutes": round(st["minutes"][0], 1),
+                         "games": len(cur) + len(prev), "games_this_season": len(cur),
+                         "minutes": round(st["minutes"][0], 1),
                          "status": statuses.get(pl["name"]),
                          "_raw": {k: (st[k][0] * (f_pace if k == "rebounds" else f_team),
                                       st[k][1] * (f_pace if k == "rebounds" else f_team)) for k in STATS}})

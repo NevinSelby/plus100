@@ -940,7 +940,7 @@ function renderNba(out, p) {
   const teamHd = (key) => `<span><span class="full">${esc(p[key].name)}</span><span class="abbr">${esc(ab(key))}</span></span>`;
   const h2h = p.h2h || [];
   out.innerHTML = `<div class="hero">
-    <div class="sb-top"><span><b>Projected final</b>${neutral ? " · neutral court" : ""}</span><span class="ln">${esc(spreadTxt)} · O/U ${pr.total.toFixed(1)}</span></div>
+    <div class="sb-top"><span><b>Projected final</b>${neutral ? " · neutral court" : ""}</span><span class="ln">${esc(spreadTxt)} · O/U ${pr.total.toFixed(1)}${p.market ? ` <i class="mk">books ${esc(p.market.text || "")}${p.market.total != null ? ` · O/U ${p.market.total}` : ""}</i>` : ""}</span></div>
     ${row("home", S.home, kh, "home")}
     ${row("away", S.away, ka, "away")}
     <div class="sb-bar"><div class="stack"><div style="width:${w.home*100}%;background:${kh}"></div><div style="width:${w.away*100}%;background:${ka}"></div></div>
@@ -997,7 +997,8 @@ function renderProps(box, r, q) {
   const prow = (pl, color) => {
     const tag = pl.status && /questionable|doubtful|out|probable|gtd/i.test(pl.status)
       ? `<span class="ptag${/out/i.test(pl.status) ? " out" : ""}">${esc(pl.status)}</span>` : "";
-    const sub = [pl.pos, pl.minutes != null ? `${Number(pl.minutes).toFixed(0)} min` : "", pl.games ? `${pl.games} gp` : ""].filter(Boolean).join(" · ");
+    const sub = [pl.pos, pl.minutes != null ? `${Number(pl.minutes).toFixed(0)} min` : "",
+      pl.games_this_season != null ? `${pl.games_this_season} gp this season` : (pl.games ? `${pl.games} gp` : "")].filter(Boolean).join(" · ");
     return `<div class="prow">
       <div class="pname">${pl.headshot ? `<img src="${esc(pl.headshot)}" alt="" loading="lazy" data-hide>` : ""}<div><div class="nm"><b>${esc(pl.name)}</b>${tag}</div><span>${esc(sub)}</span></div></div>
       <div class="pcells">${cell("PTS", pl.stats?.points, color)}${cell("REB", pl.stats?.rebounds, color)}${cell("AST", pl.stats?.assists, color)}${cell("3PM", pl.stats?.threes, color)}</div></div>`;
