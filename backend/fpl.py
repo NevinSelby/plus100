@@ -512,7 +512,13 @@ def _sb_h(k):
     return {"apikey": k, "Authorization": f"Bearer {k}", "Content-Type": "application/json"}
 
 
+UNAVAILABLE = object()   # the record store answered with an error or not at all
+
+
 def state_get(key: str):
+    """The stored value, None when the store says there is none, UNAVAILABLE when
+    it could not be asked. Callers must never treat UNAVAILABLE as "no state":
+    that is how a real squad gets overwritten by a fresh seed."""
     conf = _sb_conf()
     if conf:
         u, k = conf
@@ -522,22 +528,25 @@ def state_get(key: str):
             if r.status_code == 200:
                 rows = r.json()
                 return rows[0]["value"] if rows else None
+            return UNAVAILABLE
         except Exception:  # noqa: BLE001
-            pass
+            return UNAVAILABLE
     try:
         return json.loads(STATE_FILE.read_text()).get(key)
     except Exception:  # noqa: BLE001
         return None
 
 
-def state_put(key: str, value) -> bool:
+def state_put(key: str, value, insert_only: bool = False) -> bool:
+    """Save a value. insert_only never replaces an existing row (used for seeds)."""
     saved = False
     conf = _sb_conf()
     if conf:
         u, k = conf
         try:
+            res = "ignore-duplicates" if insert_only else "merge-duplicates"
             r = requests.post(f"{u}/rest/v1/fpl_state", json=[{"key": key, "value": value}],
-                              headers=_sb_h(k) | {"Prefer": "resolution=merge-duplicates,return=minimal"},
+                              headers=_sb_h(k) | {"Prefer": f"resolution={res},return=minimal"},
                               timeout=10)
             saved = r.status_code in (200, 201, 204)
         except Exception:  # noqa: BLE001
@@ -700,6 +709,10 @@ def _model_squad_locked(store: Store) -> dict:
         pass
 
     st = state_get("model_squad")
+    if st is UNAVAILABLE:
+        return {"error": "state_unavailable",
+                "detail": "The model team's record store could not be reached just now. The squad lives "
+                          "there, so nothing is rebuilt; try again in a minute."}
     if st and st.get("season") and st["season"] != season:
         # new season: element ids reshuffle, so last season's state would render
         # garbage. Archive it and build a fresh squad from this week's xPts.
@@ -718,7 +731,10 @@ def _model_squad_locked(store: Store) -> dict:
               "xi_history": {str(gw): {"xi": xi_ids, "captain": cap, "vice": vice,
                                        "squad": [{"id": p["id"], "pos": p["pos"]} for p in squad]}},
               "transfers": [], "scores": []}
-        state_put("model_squad", st)
+        state_put("model_squad", st, insert_only=True)   # a seed never overwrites a real squad
+        again = state_get("model_squad")
+        if isinstance(again, dict) and again.get("created_gw") != st["created_gw"]:
+            st = again
 
     st.setdefault("xi_history", {})
     dirty = False

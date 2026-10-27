@@ -1115,6 +1115,29 @@ def _require_admin(request: Request) -> None:
         raise HTTPException(401, "admin login required")
 
 
+class StateBody(BaseModel):
+    key: str
+    value: dict
+
+
+@app.get("/api/admin/fpl/state")
+def admin_fpl_state(request: Request, key: str = "model_squad"):
+    """Read one stored fantasy record (the model squad or an archive) for inspection."""
+    _require_admin(request)
+    v = _fpl.state_get(key)
+    return {"key": key, "unavailable": v is _fpl.UNAVAILABLE, "value": None if v is _fpl.UNAVAILABLE else v}
+
+
+@app.post("/api/admin/fpl/state")
+def admin_fpl_state_put(body: StateBody, request: Request):
+    """Restore or correct a stored fantasy record. Whatever was there is kept under a dated key first."""
+    _require_admin(request)
+    prev = _fpl.state_get(body.key)
+    if isinstance(prev, dict):
+        _fpl.state_put(f"{body.key}_before_{int(time.time())}", prev)
+    return {"saved": _fpl.state_put(body.key, body.value)}
+
+
 @app.get("/api/admin/stats")
 def admin_stats(request: Request):
     _require_admin(request)

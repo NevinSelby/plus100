@@ -1029,7 +1029,10 @@ def grade_props(home: str, away: str, key: str, market_weight: float = FITTED_MA
         return out
     props = player_props(hh, ha, date=(hit.get("commence_time") or "")[:10] or None)
     rows = grade_prop_event(ev, props, market_weight)
-    out.update({"bets": rows, "all_evaluated": len(rows), "fixtures": 1, "n_books": count_books([ev]),
+    rows.sort(key=lambda x: (not x["value"], -x["edge_pct"]))   # value lines first, best edge first
+    shown = rows[:40]                                             # the UI shows a page, not 300 cards
+    out.update({"bets": shown, "all_evaluated": len(rows), "n_value": sum(1 for x in rows if x["value"]),
+                "fixtures": 1, "n_books": count_books([ev]),
                 "commence": hit.get("commence_time"), "match": f"{hit['home_team']} vs {hit['away_team']}",
                 "caveats": props["caveats"]})
     return out
